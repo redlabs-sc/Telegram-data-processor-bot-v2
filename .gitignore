@@ -1,0 +1,61 @@
+# Environment
+.env
+.env.local
+*.env
+
+# Binaries
+telegram-bot-option2
+coordinator/coordinator
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Batch workspaces (auto-managed at runtime)
+batches/*
+!batches/.gitkeep
+
+# Downloads (temporary storage)
+downloads/*
+!downloads/.gitkeep
+
+# Archive (failed batches)
+archive/*
+!archive/.gitkeep
+!archive/failed/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+*.mod.sum
+
+# Docker
+.dockerignore
+
+# Temporary files
+tmp/
+temp/

@@ -1,0 +1,3 @@
+9ef6e27b811e04e39faf3432a86043a5e731e8b4202947f49de42837a08e0c72  app/extraction/extract/extract.go
+c015dedf873792735cd67d7ae5cede9ae5628750fd71e32f717801b7a7e73672  app/extraction/convert/convert.go
+2ebf3eb75f4c45fd1bb60630dcae23efb42ada8b2b73c542c15738dff7b64c8b  app/extraction/store.go
