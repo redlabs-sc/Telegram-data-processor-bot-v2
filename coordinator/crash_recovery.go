@@ -28,7 +28,11 @@ func (cr *CrashRecovery) RecoverOnStartup(ctx context.Context) error {
 		return err
 	}
 
-	if err := cr.recoverStuckBatches(ctx); err != nil {
+	if err := cr.recoverStuckRounds(ctx); err != nil {
+		return err
+	}
+
+	if err := cr.recoverStuckStoreTasks(ctx); err != nil {
 		return err
 	}
 
@@ -77,58 +81,116 @@ func (cr *CrashRecovery) recoverStuckDownloads(ctx context.Context) error {
 	return nil
 }
 
-// recoverStuckBatches resets batches that were interrupted
-func (cr *CrashRecovery) recoverStuckBatches(ctx context.Context) error {
-	// Find batches stuck in processing states for > 2 hours
+// recoverStuckRounds resets rounds that were interrupted during extract or convert stages
+func (cr *CrashRecovery) recoverStuckRounds(ctx context.Context) error {
+	// Find rounds stuck in EXTRACTING state for > 2 hours
+	extractQuery := `
+		UPDATE processing_rounds
+		SET extract_status = 'PENDING',
+		    extract_worker_id = NULL,
+		    extract_started_at = NULL,
+		    round_status = 'CREATED'
+		WHERE extract_status = 'EXTRACTING'
+		  AND extract_started_at < NOW() - INTERVAL '2 hours'
+		RETURNING round_id
+	`
+
+	rows, err := cr.db.QueryContext(ctx, extractQuery)
+	if err != nil {
+		cr.logger.Error("Failed to recover stuck extract rounds", zap.Error(err))
+		return err
+	}
+
+	extractCount := 0
+	for rows.Next() {
+		var roundID string
+		if err := rows.Scan(&roundID); err != nil {
+			cr.logger.Error("Failed to scan recovered extract round", zap.Error(err))
+			continue
+		}
+		cr.logger.Info("Recovered stuck extract round", zap.String("round_id", roundID))
+		extractCount++
+	}
+	rows.Close()
+
+	if extractCount > 0 {
+		cr.logger.Info("Recovered stuck extract rounds", zap.Int("count", extractCount))
+	}
+
+	// Find rounds stuck in CONVERTING state for > 2 hours
+	convertQuery := `
+		UPDATE processing_rounds
+		SET convert_status = 'PENDING',
+		    convert_worker_id = NULL,
+		    convert_started_at = NULL,
+		    round_status = 'EXTRACTING'
+		WHERE convert_status = 'CONVERTING'
+		  AND convert_started_at < NOW() - INTERVAL '2 hours'
+		RETURNING round_id
+	`
+
+	rows, err = cr.db.QueryContext(ctx, convertQuery)
+	if err != nil {
+		cr.logger.Error("Failed to recover stuck convert rounds", zap.Error(err))
+		return err
+	}
+
+	convertCount := 0
+	for rows.Next() {
+		var roundID string
+		if err := rows.Scan(&roundID); err != nil {
+			cr.logger.Error("Failed to scan recovered convert round", zap.Error(err))
+			continue
+		}
+		cr.logger.Info("Recovered stuck convert round", zap.String("round_id", roundID))
+		convertCount++
+	}
+	rows.Close()
+
+	if convertCount > 0 {
+		cr.logger.Info("Recovered stuck convert rounds", zap.Int("count", convertCount))
+	}
+
+	return nil
+}
+
+// recoverStuckStoreTasks resets store tasks that were interrupted
+func (cr *CrashRecovery) recoverStuckStoreTasks(ctx context.Context) error {
+	// Find store tasks stuck in STORING state for > 2 hours
 	query := `
-		UPDATE batch_processing
-		SET status = 'QUEUED',
-			worker_id = NULL,
-			started_at = NULL
-		WHERE status IN ('EXTRACTING', 'CONVERTING', 'STORING')
+		UPDATE store_tasks
+		SET status = 'PENDING',
+		    worker_id = NULL,
+		    started_at = NULL
+		WHERE status = 'STORING'
 		  AND started_at < NOW() - INTERVAL '2 hours'
-		RETURNING batch_id
+		RETURNING task_id, round_id
 	`
 
 	rows, err := cr.db.QueryContext(ctx, query)
 	if err != nil {
-		cr.logger.Error("Failed to recover stuck batches", zap.Error(err))
+		cr.logger.Error("Failed to recover stuck store tasks", zap.Error(err))
 		return err
 	}
 	defer rows.Close()
 
 	count := 0
-	var batchIDs []string
 	for rows.Next() {
-		var batchID string
-		if err := rows.Scan(&batchID); err != nil {
-			cr.logger.Error("Failed to scan recovered batch", zap.Error(err))
+		var taskID int64
+		var roundID string
+		if err := rows.Scan(&taskID, &roundID); err != nil {
+			cr.logger.Error("Failed to scan recovered store task", zap.Error(err))
 			continue
 		}
-		batchIDs = append(batchIDs, batchID)
+
+		cr.logger.Info("Recovered stuck store task",
+			zap.Int64("task_id", taskID),
+			zap.String("round_id", roundID))
 		count++
 	}
 
 	if count > 0 {
-		cr.logger.Info("Recovered stuck batches", zap.Int("count", count))
-
-		// Reset files in recovered batches to DOWNLOADED state
-		for _, batchID := range batchIDs {
-			_, err := cr.db.ExecContext(ctx, `
-				UPDATE download_queue
-				SET batch_id = NULL
-				WHERE batch_id = $1
-			`, batchID)
-
-			if err != nil {
-				cr.logger.Error("Failed to reset batch files",
-					zap.String("batch_id", batchID),
-					zap.Error(err))
-			} else {
-				cr.logger.Info("Reset files from recovered batch",
-					zap.String("batch_id", batchID))
-			}
-		}
+		cr.logger.Info("Recovered stuck store tasks", zap.Int("count", count))
 	}
 
 	return nil
@@ -164,17 +226,45 @@ func (cr *CrashRecovery) checkForStuckTasks(ctx context.Context) {
 		cr.recoverStuckDownloads(ctx)
 	}
 
-	// Check for batches stuck for > 2 hours
-	var stuckBatches int
+	// Check for rounds stuck in extract stage for > 2 hours
+	var stuckExtractRounds int
 	err = cr.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
-		FROM batch_processing
-		WHERE status IN ('EXTRACTING', 'CONVERTING', 'STORING')
-		  AND started_at < NOW() - INTERVAL '2 hours'
-	`).Scan(&stuckBatches)
+		FROM processing_rounds
+		WHERE extract_status = 'EXTRACTING'
+		  AND extract_started_at < NOW() - INTERVAL '2 hours'
+	`).Scan(&stuckExtractRounds)
 
-	if err == nil && stuckBatches > 0 {
-		cr.logger.Warn("Detected stuck batches", zap.Int("count", stuckBatches))
-		cr.recoverStuckBatches(ctx)
+	if err == nil && stuckExtractRounds > 0 {
+		cr.logger.Warn("Detected stuck extract rounds", zap.Int("count", stuckExtractRounds))
+		cr.recoverStuckRounds(ctx)
+	}
+
+	// Check for rounds stuck in convert stage for > 2 hours
+	var stuckConvertRounds int
+	err = cr.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM processing_rounds
+		WHERE convert_status = 'CONVERTING'
+		  AND convert_started_at < NOW() - INTERVAL '2 hours'
+	`).Scan(&stuckConvertRounds)
+
+	if err == nil && stuckConvertRounds > 0 {
+		cr.logger.Warn("Detected stuck convert rounds", zap.Int("count", stuckConvertRounds))
+		cr.recoverStuckRounds(ctx)
+	}
+
+	// Check for store tasks stuck for > 2 hours
+	var stuckStoreTasks int
+	err = cr.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM store_tasks
+		WHERE status = 'STORING'
+		  AND started_at < NOW() - INTERVAL '2 hours'
+	`).Scan(&stuckStoreTasks)
+
+	if err == nil && stuckStoreTasks > 0 {
+		cr.logger.Warn("Detected stuck store tasks", zap.Int("count", stuckStoreTasks))
+		cr.recoverStuckStoreTasks(ctx)
 	}
 }

@@ -15,10 +15,12 @@ type MetricsCollector struct {
 	// Queue metrics
 	queueSize *prometheus.GaugeVec
 
-	// Batch metrics
-	batchProcessingDuration *prometheus.HistogramVec
-	batchesActive           prometheus.Gauge
-	batchesTotal            *prometheus.CounterVec
+	// Round metrics
+	roundProcessingDuration *prometheus.HistogramVec
+	roundsActive            *prometheus.GaugeVec // By stage: extracting, converting, storing
+	roundsTotal             *prometheus.CounterVec
+	storeTasksActive        prometheus.Gauge
+	storeTasksTotal         *prometheus.CounterVec
 
 	// Worker metrics
 	workerStatus *prometheus.GaugeVec
@@ -41,28 +43,44 @@ func NewMetricsCollector(db *sql.DB, logger *zap.Logger) *MetricsCollector {
 			[]string{"status"},
 		),
 
-		batchProcessingDuration: promauto.NewHistogramVec(
+		roundProcessingDuration: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Name:    "telegram_bot_batch_processing_duration_seconds",
-				Help:    "Time to process a batch",
+				Name:    "telegram_bot_round_processing_duration_seconds",
+				Help:    "Time to process a round through each stage",
 				Buckets: []float64{60, 300, 600, 1200, 1800, 3600, 7200}, // 1m, 5m, 10m, 20m, 30m, 1h, 2h
 			},
-			[]string{"stage"},
+			[]string{"stage"}, // extract, convert, store
 		),
 
-		batchesActive: promauto.NewGauge(
+		roundsActive: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "telegram_bot_batches_active",
-				Help: "Number of currently active batches",
+				Name: "telegram_bot_rounds_active",
+				Help: "Number of rounds in each processing stage",
+			},
+			[]string{"stage"}, // extracting, converting, storing
+		),
+
+		roundsTotal: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "telegram_bot_rounds_total",
+				Help: "Total number of rounds processed",
+			},
+			[]string{"status"}, // completed, failed
+		),
+
+		storeTasksActive: promauto.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "telegram_bot_store_tasks_active",
+				Help: "Number of store tasks currently processing",
 			},
 		),
 
-		batchesTotal: promauto.NewCounterVec(
+		storeTasksTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "telegram_bot_batches_total",
-				Help: "Total number of batches processed",
+				Name: "telegram_bot_store_tasks_total",
+				Help: "Total number of store tasks processed",
 			},
-			[]string{"status"},
+			[]string{"status"}, // completed, failed
 		),
 
 		workerStatus: promauto.NewGaugeVec(
@@ -119,33 +137,55 @@ func (mc *MetricsCollector) UpdateQueueMetrics() {
 	mc.queueSize.WithLabelValues("failed").Set(float64(failed))
 }
 
-// UpdateBatchMetrics updates batch-related metrics from database
-func (mc *MetricsCollector) UpdateBatchMetrics() {
-	var processing int
+// UpdateRoundMetrics updates round-related metrics from database
+func (mc *MetricsCollector) UpdateRoundMetrics() {
+	// Count rounds in each processing stage
+	var extracting, converting, storing int
 
 	query := `
-		SELECT COUNT(*)
-		FROM batch_processing
-		WHERE status IN ('EXTRACTING', 'CONVERTING', 'STORING')
+		SELECT
+			COUNT(CASE WHEN round_status = 'EXTRACTING' THEN 1 END) as extracting,
+			COUNT(CASE WHEN round_status = 'CONVERTING' THEN 1 END) as converting,
+			COUNT(CASE WHEN round_status = 'STORING' THEN 1 END) as storing
+		FROM processing_rounds
+		WHERE round_status IN ('EXTRACTING', 'CONVERTING', 'STORING')
 	`
 
-	err := mc.db.QueryRow(query).Scan(&processing)
+	err := mc.db.QueryRow(query).Scan(&extracting, &converting, &storing)
 	if err != nil {
-		mc.logger.Error("Failed to update batch metrics", zap.Error(err))
-		return
+		mc.logger.Error("Failed to update round stage metrics", zap.Error(err))
+	} else {
+		mc.roundsActive.WithLabelValues("extracting").Set(float64(extracting))
+		mc.roundsActive.WithLabelValues("converting").Set(float64(converting))
+		mc.roundsActive.WithLabelValues("storing").Set(float64(storing))
 	}
 
-	mc.batchesActive.Set(float64(processing))
+	// Count active store tasks
+	var storeTasksProcessing int
+	err = mc.db.QueryRow(`
+		SELECT COUNT(*) FROM store_tasks WHERE status = 'STORING'
+	`).Scan(&storeTasksProcessing)
+
+	if err != nil {
+		mc.logger.Error("Failed to update store task metrics", zap.Error(err))
+	} else {
+		mc.storeTasksActive.Set(float64(storeTasksProcessing))
+	}
 }
 
-// RecordBatchDuration records the duration of a batch processing stage
-func (mc *MetricsCollector) RecordBatchDuration(stage string, durationSec int) {
-	mc.batchProcessingDuration.WithLabelValues(stage).Observe(float64(durationSec))
+// RecordRoundDuration records the duration of a round processing stage
+func (mc *MetricsCollector) RecordRoundDuration(stage string, durationSec int) {
+	mc.roundProcessingDuration.WithLabelValues(stage).Observe(float64(durationSec))
 }
 
-// RecordBatchCompleted increments the batch completion counter
-func (mc *MetricsCollector) RecordBatchCompleted(status string) {
-	mc.batchesTotal.WithLabelValues(status).Inc()
+// RecordRoundCompleted increments the round completion counter
+func (mc *MetricsCollector) RecordRoundCompleted(status string) {
+	mc.roundsTotal.WithLabelValues(status).Inc()
+}
+
+// RecordStoreTaskCompleted increments the store task completion counter
+func (mc *MetricsCollector) RecordStoreTaskCompleted(status string) {
+	mc.storeTasksTotal.WithLabelValues(status).Inc()
 }
 
 // SetWorkerStatus sets the health status of a worker

@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a **Telegram Data Processor Bot** implementing **Option 2: Batch-Based Parallel Processing System**. The architecture achieves 6× faster processing compared to sequential processing by distributing files into isolated batch directories and running multiple extract/convert/store pipelines in parallel.
+This is a **Telegram Data Processor Bot** implementing a **Pipelined Multi-Round Processing System**. The architecture achieves 2.6× faster processing compared to sequential processing by allowing extract, convert, and store stages to operate on different rounds simultaneously.
 
-**Implementation Status**: Phases 1-4 complete (Foundation, Download Pipeline, Batch Coordinator, Batch Workers). Phases 5-6 (Admin Commands, Testing) are optional enhancements.
+**Implementation Status**: Core pipelined architecture complete (Download Pipeline, Round Coordinator, Extract/Convert/Store Workers). Further optimizations and admin commands are optional enhancements.
 
-**Critical Design Principle**: Three core processing files (`extract.go`, `convert.go`, `store.go`) are **100% preserved** - never modify them. All parallelism is achieved through batch directory isolation and working directory changes.
+**Critical Design Principle**: Three core processing files (`extract.go`, `convert.go`, `store.go`) are **100% preserved** - never modify them. Extract and convert are singleton workers processing global directories. Store workers process isolated task directories to enable parallelism.
 
 ## Architecture
 
@@ -16,53 +16,63 @@ This is a **Telegram Data Processor Bot** implementing **Option 2: Batch-Based P
 
 1. **Telegram Receiver** (`telegram_receiver.go`): Handles bot commands and file uploads, validates admin users
 2. **Download Workers** (`download_worker.go`): 3 concurrent workers download files from Telegram to `downloads/`
-3. **Batch Coordinator** (`batch_coordinator.go`): Groups downloaded files into batches of 10, creates isolated directories
-4. **Batch Workers** (`batch_worker.go`): 5 concurrent workers process batches through extract → convert → store pipeline
-5. **Crash Recovery** (`crash_recovery.go`): Detects and recovers stuck downloads/batches on startup
-6. **Health/Metrics** (`health.go`, `metrics.go`): HTTP endpoints for monitoring
+3. **Round Coordinator** (`round_coordinator.go`): Groups downloaded files into rounds of 50, moves to staging directories
+4. **Extract Worker** (`extract_worker.go`): **Singleton worker** - only 1 instance, processes ALL archives through extract stage
+5. **Convert Worker** (`convert_worker.go`): **Singleton worker** - only 1 instance, processes ALL text files through convert stage
+6. **Store Workers** (`store_worker.go`): 5 concurrent workers process 2-file tasks through store stage in isolated directories
+7. **Crash Recovery** (`crash_recovery.go`): Detects and recovers stuck downloads/rounds/tasks on startup
+8. **Health/Metrics** (`health.go`, `metrics.go`): HTTP endpoints for monitoring
 
-### Batch Processing Flow
+### Pipelined Round Processing Flow
 
 ```
-Telegram → Download Queue → downloads/ → Batch Creation → batches/batch_XXX/ → Process → Database
+Telegram → Download Queue → downloads/ → Round Creation → Staging Directories → Pipeline Stages → Database
+                                              ↓
+                    Archives → app/extraction/files/all/ (Extract Stage)
+                    TXT files → app/extraction/files/txt/ (Convert Stage)
+                                              ↓
+                                    Store Tasks (2 files each)
+                                              ↓
+                                store_tasks/123/ (Isolated directory)
 ```
 
-Each batch gets an isolated directory structure:
+**Pipeline Parallelism**: Multiple rounds exist in different stages simultaneously:
 ```
-batches/batch_001/
-├── app/extraction/
-│   ├── files/
-│   │   ├── all/          # Input archives
-│   │   ├── txt/          # Direct TXT files + converted output
-│   │   ├── pass/         # Extracted files
-│   │   ├── nopass/       # Password-protected archives
-│   │   └── errors/       # Failed extractions
-│   └── pass.txt          # Password list (copied from root)
-└── logs/
-    ├── extract.log
-    ├── convert.log
-    └── store.log
+Time 0-10:  Round 1 extracting
+Time 10-15: Round 1 converting  | Round 2 extracting
+Time 15-55: Round 1 storing      | Round 2 converting | Round 3 extracting
+Time 55+:   Round 1 COMPLETE     | Round 2 storing    | Round 3 converting | Round 4 extracting
 ```
 
 ### Code Preservation Strategy
 
-The existing extraction code processes files in fixed relative paths (`app/extraction/files/all/`, etc.). Instead of modifying this code, we:
+The preserved code processes files in specific ways:
 
-1. Create the full `app/extraction/files/` directory structure inside each batch directory
-2. Change the working directory to the batch root before executing processing code
-3. The unchanged code operates on its expected relative paths, which now resolve to batch-specific directories
+1. **extract.go**: Processes ALL archives in `app/extraction/files/all/` directory
+2. **convert.go**: Processes ALL text files in `CONVERT_INPUT_DIR` (env var)
+3. **store.go**: Processes 2 files at a time from `app/extraction/files/txt/`
 
-**Critical Implementation** (from `batch_worker.go:215-220`):
+**Preservation approach**:
+- **Extract & Convert**: Only ONE worker each (singleton) prevents simultaneous execution
+- **Store**: Each task runs in isolated directory (`store_tasks/123/`) with only its 2 assigned files
+
+**Critical Implementation** (from `store_worker.go:150-165`):
 ```go
+// Create isolated task directory
+taskDir := fmt.Sprintf("store_tasks/%d", task.TaskID)
+
+// Copy only the 2 assigned files to task directory
+setupStoreTaskDirectory(taskDir, task.FilePaths)
+
 // Save current working directory
-originalWD, _ := os.Getwd()
-defer os.Chdir(originalWD) // Always restore
+originalDir, _ := os.Getwd()
+defer os.Chdir(originalDir) // Always restore
 
-// Change to batch directory - this is the key to code preservation
-os.Chdir(batchRoot) // e.g., "batches/batch_001/"
+// Change to task directory
+os.Chdir(taskDir)
 
-// Now when extract.go references "app/extraction/files/all/",
-// it resolves to "batches/batch_001/app/extraction/files/all/"
+// Now store.go processes only these 2 files in isolation
+extraction.RunPipeline(ctx)
 ```
 
 ## Development Commands
@@ -95,7 +105,8 @@ psql telegram_bot_option2 -c "GRANT ALL PRIVILEGES ON DATABASE telegram_bot_opti
 
 # Verify tables created
 psql -U bot_user -d telegram_bot_option2 -c "\dt"
-# Should show: download_queue, batch_processing, batch_files, processing_metrics
+# Should show: download_queue, processing_rounds, store_tasks, processing_metrics
+# Note: batch_processing and batch_files are deprecated but kept for rollback
 ```
 
 ### Building and Running
@@ -127,18 +138,36 @@ curl http://localhost:9090/metrics
 # View coordinator logs (JSON format by default)
 tail -f logs/coordinator.log
 
-# View batch-specific logs
-tail -f batches/batch_001/logs/extract.log
-tail -f batches/batch_001/logs/convert.log
-tail -f batches/batch_001/logs/store.log
-
 # Monitor queue in database
 psql -U bot_user -d telegram_bot_option2 -c \
   "SELECT status, COUNT(*) FROM download_queue GROUP BY status;"
 
-# Monitor active batches
+# Monitor active rounds
 psql -U bot_user -d telegram_bot_option2 -c \
-  "SELECT batch_id, status, worker_id, started_at FROM batch_processing WHERE status != 'COMPLETED' ORDER BY created_at;"
+  "SELECT round_id, round_status, extract_status, convert_status, store_status, created_at
+   FROM processing_rounds
+   WHERE round_status != 'COMPLETED'
+   ORDER BY created_at DESC;"
+
+# Monitor store tasks
+psql -U bot_user -d telegram_bot_option2 -c \
+  "SELECT round_id, COUNT(*) as total_tasks,
+          SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN status='STORING' THEN 1 ELSE 0 END) as in_progress,
+          SUM(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) as pending
+   FROM store_tasks
+   GROUP BY round_id
+   ORDER BY round_id DESC
+   LIMIT 10;"
+
+# View round details
+psql -U bot_user -d telegram_bot_option2 -c \
+  "SELECT round_id, file_count, archive_count, txt_count,
+          extract_duration_sec, convert_duration_sec, store_duration_sec
+   FROM processing_rounds
+   WHERE round_status = 'COMPLETED'
+   ORDER BY created_at DESC
+   LIMIT 10;"
 ```
 
 ### Code Verification
@@ -162,9 +191,10 @@ All configuration is managed via environment variables in `.env`. See `.env.exam
 
 **Critical Settings**:
 - `MAX_DOWNLOAD_WORKERS=3` - **MUST be exactly 3** (Telegram API rate limit)
-- `MAX_BATCH_WORKERS=5` - Maximum concurrent batches (5 is tested, can increase to 10-20 for scaling)
-- `BATCH_SIZE=10` - Files per batch
-- `BATCH_TIMEOUT_SEC=300` - Create batch if files wait > 5 minutes (even if not full)
+- `MAX_STORE_WORKERS=5` - Concurrent store workers (5 is tested, can increase to 10-20 for scaling)
+- `ROUND_SIZE=50` - Files per round (10-100 allowed)
+- `ROUND_TIMEOUT_SEC=300` - Create round if files wait > 5 minutes (even if not full)
+- **Note**: Extract and convert workers are always 1 (singleton requirement, not configurable)
 
 **Database** (PostgreSQL required):
 - `DB_HOST=localhost`, `DB_PORT=5432`, `DB_NAME=telegram_bot_option2`
@@ -184,8 +214,8 @@ All configuration is managed via environment variables in `.env`. See `.env.exam
 - `STORE_TIMEOUT_SEC=3600` (60 min)
 
 **Cleanup**:
-- `COMPLETED_BATCH_RETENTION_HOURS=1` - Delete successful batches after 1 hour
-- `FAILED_BATCH_RETENTION_DAYS=7` - Keep failed batches for debugging
+- `COMPLETED_ROUND_RETENTION_HOURS=1` - Delete successful rounds after 1 hour
+- `FAILED_ROUND_RETENTION_DAYS=7` - Keep failed rounds for debugging
 
 ## Critical Implementation Rules
 
@@ -198,15 +228,17 @@ All configuration is managed via environment variables in `.env`. See `.env.exam
 
 **Verification**: Run `sha256sum -c checksums.txt` after ANY changes. If checksums don't match, revert immediately.
 
-**Why**: The entire batch-based architecture is designed around preserving these files. Any modification breaks the working directory pattern and defeats the purpose of this implementation.
+**Why**: The entire pipelined architecture is designed around preserving these files. Any modification breaks the working directory pattern and defeats the purpose of this implementation.
 
 ### 2. Worker Concurrency Limits
 
 **Fixed limits**:
 - Download workers: **Exactly 3** (Telegram API constraint, enforced in `config.go` validation)
-- Batch workers: **Maximum 5** (tested configuration, configurable via `MAX_BATCH_WORKERS`)
+- Extract worker: **Exactly 1** (Singleton requirement - extract.go processes ALL files in global directory)
+- Convert worker: **Exactly 1** (Singleton requirement - convert.go processes ALL files in global directory)
+- Store workers: **5 default, configurable 1-20** (Each processes 2-file tasks in isolated directories)
 
-**Reason**: Extract and convert process entire directories. Multiple workers on the same directory cause race conditions and data corruption. Batch isolation solves this by giving each worker its own directory.
+**Reason**: Extract and convert process entire directories. Only ONE instance can run at a time to prevent race conditions. Store workers process isolated task directories (store_tasks/123/), allowing parallelism.
 
 ### 3. Database Locking Pattern
 
@@ -229,23 +261,27 @@ This pattern:
 
 ### 4. Working Directory Pattern
 
-**Always restore the original working directory**:
+**Store workers restore the original working directory**:
 
 ```go
 originalDir, _ := os.Getwd()
 defer os.Chdir(originalDir)  // Use defer to ensure restoration even on error
 
-os.Chdir(batchDir)
-// ... execute batch processing
+os.Chdir(taskDir)  // e.g., "store_tasks/123/"
+// ... execute store.RunPipeline()
 ```
 
-**Why `defer` is critical**: If processing fails and panics, defer ensures we restore the working directory. Without this, subsequent batches might process in the wrong directory.
+**Why `defer` is critical**: If processing fails and panics, defer ensures we restore the working directory. Without this, subsequent tasks might process in the wrong directory.
 
-### 5. Batch Cleanup
+**Extract and convert workers** do NOT change directories - they process global staging directories:
+- Extract: `app/extraction/files/all/`
+- Convert: `app/extraction/files/pass/` and `app/extraction/files/txt/`
 
-Implemented in `batch_worker.go:380`:
-- Completed batches: Deleted after `COMPLETED_BATCH_RETENTION_HOURS` (default 1 hour) to free disk space
-- Failed batches: Should be moved to `archive/failed/` and retained for `FAILED_BATCH_RETENTION_DAYS` (default 7 days)
+### 5. Round and Task Cleanup
+
+- Completed rounds: Deleted after `COMPLETED_ROUND_RETENTION_HOURS` (default 1 hour) to free disk space
+- Failed rounds: Should be retained for `FAILED_ROUND_RETENTION_DAYS` (default 7 days) for debugging
+- Store task directories: Cleaned up immediately after task completion (successful or failed)
 - Monitor disk space: Health endpoint warns if < 50GB free
 
 ## Admin Telegram Commands
@@ -254,9 +290,9 @@ Implemented in `batch_worker.go:380`:
 - `/start` - Welcome message with bot information
 - `/help` - List available commands
 
-**Stub Implementations** (placeholders for Phase 5):
+**Stub Implementations** (placeholders for future):
 - `/queue` - Show queue statistics (pending, downloading, downloaded, failed)
-- `/batches` - List active batches with status and progress
+- `/rounds` - List active rounds with status and progress (extract, convert, store stages)
 - `/stats` - Overall system statistics (throughput, success rate, avg time)
 - `/health` - System health check (workers alive, disk space, memory)
 
@@ -264,6 +300,7 @@ Implemented in `batch_worker.go:380`:
 - `/retry <task_id>` - Retry failed download task
 - `/cancel <task_id>` - Cancel pending task
 - `/priority <task_id>` - Increase task priority
+- `/round <round_id>` - Show detailed status of a specific round
 
 To implement these, modify `telegram_receiver.go` functions starting at line 160.
 
@@ -271,20 +308,26 @@ To implement these, modify `telegram_receiver.go` functions starting at line 160
 
 ### download_queue (migration 001)
 Persistent queue for file downloads.
-- **Statuses**: `PENDING` → `DOWNLOADING` → `DOWNLOADED` → (assigned to batch) → `COMPLETED/FAILED`
-- **Key fields**: `task_id`, `file_id`, `filename`, `file_type`, `file_size`, `sha256_hash`, `batch_id`
-- **Indexes**: `idx_dq_status`, `idx_dq_priority`, `idx_dq_batch`
+- **Statuses**: `PENDING` → `DOWNLOADING` → `DOWNLOADED` → (assigned to round) → `COMPLETED/FAILED`
+- **Key fields**: `task_id`, `file_id`, `filename`, `file_type`, `file_size`, `sha256_hash`, `round_id`
+- **Indexes**: `idx_dq_status`, `idx_dq_priority`, `idx_dq_round`
 
-### batch_processing (migration 002)
-Tracks batch lifecycle.
-- **Statuses**: `QUEUED` → `EXTRACTING` → `CONVERTING` → `STORING` → `COMPLETED/FAILED`
-- **Key fields**: `batch_id`, `file_count`, `archive_count`, `txt_count`, `worker_id`, duration fields
-- **Indexes**: `idx_bp_status`, `idx_bp_created`, `idx_bp_worker`
+### processing_rounds (migration 005)
+Tracks round lifecycle through pipeline stages.
+- **Round Status**: `CREATED` → `EXTRACTING` → `CONVERTING` → `STORING` → `COMPLETED/FAILED`
+- **Stage Statuses**:
+  - `extract_status`: `PENDING` → `EXTRACTING` → `COMPLETED/SKIPPED/FAILED`
+  - `convert_status`: `PENDING` → `CONVERTING` → `COMPLETED/FAILED`
+  - `store_status`: `PENDING` → `STORING` → `COMPLETED/FAILED`
+- **Key fields**: `round_id`, `file_count`, `archive_count`, `txt_count`, worker IDs, duration fields
+- **Indexes**: `idx_rounds_extract_status`, `idx_rounds_convert_status`, `idx_rounds_store_status`, `idx_rounds_round_status`
 
-### batch_files (migration 003)
-Join table linking files to batches with per-file processing status.
-- Links `download_queue.task_id` to `batch_processing.batch_id`
-- Tracks individual file status within batch
+### store_tasks (migration 005)
+Individual store tasks (2 files each) for parallel processing.
+- **Statuses**: `PENDING` → `STORING` → `COMPLETED/FAILED`
+- **Key fields**: `task_id`, `round_id`, `file_paths` (array of 2 files), `worker_id`, `duration_sec`
+- **Indexes**: `idx_store_tasks_status`, `idx_store_tasks_round`, `idx_store_tasks_worker`
+- **Purpose**: Decomposes store stage into parallel 2-file tasks, allowing 5 workers to process simultaneously
 
 ### processing_metrics (migration 004)
 Time-series metrics for analytics (download speed, stage durations, etc.)
@@ -302,15 +345,18 @@ coordinator/
 ├── metrics.go               # Prometheus metrics collector (:9090/metrics)
 ├── telegram_receiver.go     # Telegram bot message handler
 ├── download_worker.go       # Download worker pool (3 workers)
-├── batch_coordinator.go     # Batch creation and file routing
-├── batch_worker.go          # Batch processing pool (5 workers)
+├── round_coordinator.go     # Round creation and file routing to staging directories
+├── extract_worker.go        # Extract worker (singleton - only 1)
+├── convert_worker.go        # Convert worker (singleton - only 1)
+├── store_worker.go          # Store worker pool (5 workers, isolated tasks)
 └── crash_recovery.go        # Startup recovery and periodic health checks
 
 database/migrations/
 ├── 001_create_download_queue.sql
-├── 002_create_batch_processing.sql
-├── 003_create_batch_files.sql
-└── 004_create_metrics.sql
+├── 002_create_batch_processing.sql (deprecated)
+├── 003_create_batch_files.sql (deprecated)
+├── 004_create_metrics.sql
+└── 005_create_pipelined_architecture.sql  # New round-based tables
 
 app/extraction/              # PRESERVED - do not modify
 ├── extract/extract.go       # Archive extraction (ZIP, RAR)
@@ -329,53 +375,56 @@ app/extraction/              # PRESERVED - do not modify
 5. Test locally before committing
 6. Update CLAUDE.md if the feature changes workflows
 
-### Debugging a Failed Batch
+### Debugging a Failed Round
 
-1. **Find batch ID** from database or logs:
+1. **Find round ID** from database or logs:
    ```sql
-   SELECT batch_id, status, error_message, started_at
-   FROM batch_processing
-   WHERE status = 'FAILED'
+   SELECT round_id, round_status, extract_status, convert_status, store_status, error_message
+   FROM processing_rounds
+   WHERE round_status = 'FAILED'
    ORDER BY created_at DESC;
    ```
 
-2. **Check batch logs**:
+2. **Check coordinator logs**:
    ```bash
-   tail -100 batches/batch_XXX/logs/extract.log
-   tail -100 batches/batch_XXX/logs/convert.log
-   tail -100 batches/batch_XXX/logs/store.log
+   tail -100 logs/coordinator.log | grep "round_XXX"
    ```
 
 3. **Check which stage failed**:
    ```sql
    SELECT extract_duration_sec, convert_duration_sec, store_duration_sec, error_message
-   FROM batch_processing
-   WHERE batch_id = 'batch_XXX';
+   FROM processing_rounds
+   WHERE round_id = 'round_XXX';
    ```
 
-4. **Inspect failed files**:
+4. **Check store tasks for the round** (if store stage failed):
+   ```sql
+   SELECT task_id, status, error_message, started_at
+   FROM store_tasks
+   WHERE round_id = 'round_XXX' AND status = 'FAILED';
+   ```
+
+5. **Inspect failed files**:
    ```bash
-   ls -lh batches/batch_XXX/app/extraction/files/errors/
-   ls -lh batches/batch_XXX/app/extraction/files/nopass/
+   ls -lh app/extraction/files/errors/
+   ls -lh app/extraction/files/nopass/
    ```
 
-5. **Check working directory context**: Failed batches might indicate the working directory wasn't properly set
+### Scaling to More Concurrent Store Workers
 
-### Scaling to More Concurrent Batches
-
-1. **Update `.env`**: Increase `MAX_BATCH_WORKERS` (e.g., from 5 to 10)
+1. **Update `.env`**: Increase `MAX_STORE_WORKERS` (e.g., from 5 to 10)
 2. **Restart coordinator**: `pkill telegram-bot-coordinator && ./telegram-bot-coordinator`
 3. **Monitor resources**:
-   - Need ~2GB RAM + 2 CPU cores per batch worker
+   - Need ~1GB RAM + 1 CPU core per store worker
    - Check with: `curl localhost:8080/health | jq '.components.filesystem'`
-4. **Monitor batch throughput**:
+4. **Monitor round throughput**:
    ```sql
    SELECT COUNT(*) as completed_last_hour
-   FROM batch_processing
-   WHERE status = 'COMPLETED'
-   AND completed_at > NOW() - INTERVAL '1 hour';
+   FROM processing_rounds
+   WHERE round_status = 'COMPLETED'
+   AND store_completed_at > NOW() - INTERVAL '1 hour';
    ```
-5. **Adjust `BATCH_SIZE` if needed**: Smaller batches (e.g., 5) = faster feedback, more overhead
+5. **Adjust `ROUND_SIZE` if needed**: Larger rounds (e.g., 75) = better throughput, slower feedback
 
 ### Recovering from Crashes
 
@@ -383,11 +432,13 @@ The system has automatic recovery built in (`crash_recovery.go`):
 
 1. **On startup**, coordinator automatically:
    - Resets downloads stuck in `DOWNLOADING` for > 30 minutes → back to `PENDING`
-   - Resets batches stuck in processing states for > 2 hours → back to `QUEUED`
-   - Unlinks files from failed batches so they can be rebatched
+   - Resets rounds stuck in `EXTRACTING` for > 2 hours → back to `CREATED` (extract_status = PENDING)
+   - Resets rounds stuck in `CONVERTING` for > 2 hours → back to `EXTRACTING` (convert_status = PENDING)
+   - Resets store tasks stuck in `STORING` for > 2 hours → back to `PENDING`
 
 2. **Periodic health checks** (every 5 minutes):
-   - Detects stuck tasks and attempts recovery
+   - Detects stuck downloads, rounds, and store tasks
+   - Attempts automatic recovery
    - Logs warnings for investigation
 
 3. **Manual recovery** (if needed):
@@ -396,15 +447,22 @@ The system has automatic recovery built in (`crash_recovery.go`):
    UPDATE download_queue SET status = 'PENDING', started_at = NULL
    WHERE status = 'DOWNLOADING';
 
-   -- Reset all stuck batches
-   UPDATE batch_processing SET status = 'QUEUED', worker_id = NULL
-   WHERE status IN ('EXTRACTING', 'CONVERTING', 'STORING');
+   -- Reset stuck extract rounds
+   UPDATE processing_rounds
+   SET extract_status = 'PENDING', extract_worker_id = NULL,
+       extract_started_at = NULL, round_status = 'CREATED'
+   WHERE extract_status = 'EXTRACTING';
 
-   -- Unlink files from stuck batches
-   UPDATE download_queue SET batch_id = NULL
-   WHERE batch_id IN (
-     SELECT batch_id FROM batch_processing WHERE status = 'QUEUED'
-   );
+   -- Reset stuck convert rounds
+   UPDATE processing_rounds
+   SET convert_status = 'PENDING', convert_worker_id = NULL,
+       convert_started_at = NULL, round_status = 'EXTRACTING'
+   WHERE convert_status = 'CONVERTING';
+
+   -- Reset stuck store tasks
+   UPDATE store_tasks
+   SET status = 'PENDING', worker_id = NULL, started_at = NULL
+   WHERE status = 'STORING';
    ```
 
 ## Troubleshooting
