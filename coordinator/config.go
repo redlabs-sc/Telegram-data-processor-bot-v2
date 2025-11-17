@@ -27,9 +27,11 @@ type Config struct {
 
 	// Workers
 	MaxDownloadWorkers int
-	MaxBatchWorkers    int
-	BatchSize          int
-	BatchTimeoutSec    int
+	MaxExtractWorkers  int // Always 1 (singleton)
+	MaxConvertWorkers  int // Always 1 (singleton)
+	MaxStoreWorkers    int // Default 5, can scale to 10-20
+	RoundSize          int // Files per round (default 50)
+	RoundTimeoutSec    int // Create round if files wait > this (default 300)
 
 	// Timeouts (in seconds)
 	DownloadTimeoutSec int
@@ -47,8 +49,8 @@ type Config struct {
 	LogFile   string
 
 	// Cleanup
-	CompletedBatchRetentionHours int
-	FailedBatchRetentionDays     int
+	CompletedRoundRetentionHours int
+	FailedRoundRetentionDays     int
 
 	// Monitoring
 	MetricsPort     int
@@ -80,9 +82,11 @@ func LoadConfig() (*Config, error) {
 
 		// Workers
 		MaxDownloadWorkers: getEnvInt("MAX_DOWNLOAD_WORKERS", 3),
-		MaxBatchWorkers:    getEnvInt("MAX_BATCH_WORKERS", 5),
-		BatchSize:          getEnvInt("BATCH_SIZE", 10),
-		BatchTimeoutSec:    getEnvInt("BATCH_TIMEOUT_SEC", 300),
+		MaxExtractWorkers:  1, // Always 1 (hardcoded - singleton requirement)
+		MaxConvertWorkers:  1, // Always 1 (hardcoded - singleton requirement)
+		MaxStoreWorkers:    getEnvInt("MAX_STORE_WORKERS", 5),
+		RoundSize:          getEnvInt("ROUND_SIZE", 50),
+		RoundTimeoutSec:    getEnvInt("ROUND_TIMEOUT_SEC", 300),
 
 		// Timeouts
 		DownloadTimeoutSec: getEnvInt("DOWNLOAD_TIMEOUT_SEC", 1800),
@@ -100,8 +104,8 @@ func LoadConfig() (*Config, error) {
 		LogFile:   getEnv("LOG_FILE", "logs/coordinator.log"),
 
 		// Cleanup
-		CompletedBatchRetentionHours: getEnvInt("COMPLETED_BATCH_RETENTION_HOURS", 1),
-		FailedBatchRetentionDays:     getEnvInt("FAILED_BATCH_RETENTION_DAYS", 7),
+		CompletedRoundRetentionHours: getEnvInt("COMPLETED_ROUND_RETENTION_HOURS", 1),
+		FailedRoundRetentionDays:     getEnvInt("FAILED_ROUND_RETENTION_DAYS", 7),
 
 		// Monitoring
 		MetricsPort:     getEnvInt("METRICS_PORT", 9090),
@@ -136,8 +140,17 @@ func (c *Config) Validate() error {
 	if c.MaxDownloadWorkers != 3 {
 		return fmt.Errorf("MAX_DOWNLOAD_WORKERS must be exactly 3 (Telegram API limit)")
 	}
-	if c.MaxBatchWorkers < 1 || c.MaxBatchWorkers > 20 {
-		return fmt.Errorf("MAX_BATCH_WORKERS must be between 1 and 20")
+	if c.MaxExtractWorkers != 1 {
+		return fmt.Errorf("MAX_EXTRACT_WORKERS must be exactly 1 (singleton requirement)")
+	}
+	if c.MaxConvertWorkers != 1 {
+		return fmt.Errorf("MAX_CONVERT_WORKERS must be exactly 1 (singleton requirement)")
+	}
+	if c.MaxStoreWorkers < 1 || c.MaxStoreWorkers > 20 {
+		return fmt.Errorf("MAX_STORE_WORKERS must be between 1 and 20")
+	}
+	if c.RoundSize < 10 || c.RoundSize > 100 {
+		return fmt.Errorf("ROUND_SIZE must be between 10 and 100")
 	}
 	return nil
 }

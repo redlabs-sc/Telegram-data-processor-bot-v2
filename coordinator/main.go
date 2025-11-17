@@ -69,7 +69,7 @@ func main() {
 
 		for range ticker.C {
 			metrics.UpdateQueueMetrics()
-			metrics.UpdateBatchMetrics()
+			metrics.UpdateRoundMetrics()
 		}
 	}()
 
@@ -109,7 +109,20 @@ func main() {
 	}()
 
 	// Create necessary directories
-	dirs := []string{"batches", "downloads", "logs", "archive/failed"}
+	dirs := []string{
+		"downloads",
+		"logs",
+		"store_tasks",
+		"archive/failed",
+		"app/extraction/files/all",
+		"app/extraction/files/pass",
+		"app/extraction/files/txt",
+		"app/extraction/files/nonsorted",
+		"app/extraction/files/done",
+		"app/extraction/files/errors",
+		"app/extraction/files/etbanks",
+		"app/extraction/files/nopass",
+	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Fatal("Failed to create directory", zap.String("dir", dir), zap.Error(err))
@@ -143,20 +156,26 @@ func main() {
 		go worker.Start(context.Background())
 	}
 
-	// Start batch coordinator
-	batchCoordinator := NewBatchCoordinator(cfg, db, logger, metrics)
-	go batchCoordinator.Start(context.Background())
+	// Start round coordinator (creates rounds from downloaded files)
+	go roundCoordinator(context.Background(), db, cfg, logger)
 
-	// Start batch workers (up to 5 concurrent)
-	for i := 1; i <= cfg.MaxBatchWorkers; i++ {
-		workerID := fmt.Sprintf("batch_worker_%d", i)
-		worker := NewBatchWorker(workerID, cfg, db, logger, metrics)
-		go worker.Start(context.Background())
+	// Start extract worker (singleton - only 1)
+	go extractWorker(context.Background(), db, logger)
+
+	// Start convert worker (singleton - only 1)
+	go convertWorker(context.Background(), db, logger)
+
+	// Start store workers (5 concurrent by default)
+	for i := 1; i <= cfg.MaxStoreWorkers; i++ {
+		workerID := fmt.Sprintf("store_worker_%d", i)
+		go storeWorker(context.Background(), workerID, db, logger)
 	}
 
 	logger.Info("All workers started",
 		zap.Int("download_workers", cfg.MaxDownloadWorkers),
-		zap.Int("batch_workers", cfg.MaxBatchWorkers))
+		zap.Int("extract_workers", cfg.MaxExtractWorkers),
+		zap.Int("convert_workers", cfg.MaxConvertWorkers),
+		zap.Int("store_workers", cfg.MaxStoreWorkers))
 
 	logger.Info("🚀 Telegram Bot Coordinator is fully operational")
 
