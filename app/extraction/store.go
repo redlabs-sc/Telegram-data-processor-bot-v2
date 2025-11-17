@@ -2468,6 +2468,27 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 		return fmt.Errorf("error compiling priority regex pattern: %w", err)
 	}
 
+	// New Ethiopian-specific patterns
+	ethioTelecomRegex, err := regexp.Compile(`ethiotelecom\.et`)
+	if err != nil {
+		return fmt.Errorf("error compiling ethiotelecom regex pattern: %w", err)
+	}
+
+	cpanelRegex, err := regexp.Compile(`cpannel|:2083`)
+	if err != nil {
+		return fmt.Errorf("error compiling cpanel regex pattern: %w", err)
+	}
+
+	jackbotRegex, err := regexp.Compile(`dashboard.*bet.*\.et`)
+	if err != nil {
+		return fmt.Errorf("error compiling jackbot regex pattern: %w", err)
+	}
+
+	govEtRegex, err := regexp.Compile(`gov\.et`)
+	if err != nil {
+		return fmt.Errorf("error compiling gov.et regex pattern: %w", err)
+	}
+
 	// Use configurable betting directory
 	bettingDir := s.config.BettingDir
 	if err := os.MkdirAll(bettingDir, 0755); err != nil {
@@ -2478,6 +2499,10 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	bettingFile := filepath.Join(bettingDir, fmt.Sprintf("betting_sites_%s.txt", timestamp))
 	priorityFile := filepath.Join(bettingDir, fmt.Sprintf("priority_sites_%s.txt", timestamp))
+	ethioTeleFile := filepath.Join(bettingDir, fmt.Sprintf("ethiotele_%s.txt", timestamp))
+	cpanelFile := filepath.Join(bettingDir, fmt.Sprintf("cpanel_%s.txt", timestamp))
+	jackbotFile := filepath.Join(bettingDir, fmt.Sprintf("jackbot_%s.txt", timestamp))
+	etgovFile := filepath.Join(bettingDir, fmt.Sprintf("etgov_%s.txt", timestamp))
 
 	// Find latest merged file from configurable output directory
 	mergedDir := s.config.OutputDir
@@ -2532,6 +2557,12 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 	}
 	defer priorityOut.Close()
 
+	// Buffers for new Ethiopian-specific patterns (only create files if matches found)
+	var ethioTeleLines []string
+	var cpanelLines []string
+	var jackbotLines []string
+	var etgovLines []string
+
 	scanner := bufio.NewScanner(inputFile)
 	var extractedCount, priorityCount int
 	for scanner.Scan() {
@@ -2556,6 +2587,26 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 			priorityCount++
 		}
 
+		// Check for jackbot pattern (dashboard.*bet.*\.et) - writes to BOTH priority and jackbot
+		if jackbotRegex.MatchString(line) {
+			jackbotLines = append(jackbotLines, line)
+		}
+
+		// Check for Ethiopian Telecom pattern
+		if ethioTelecomRegex.MatchString(line) {
+			ethioTeleLines = append(ethioTeleLines, line)
+		}
+
+		// Check for cPanel pattern
+		if cpanelRegex.MatchString(line) {
+			cpanelLines = append(cpanelLines, line)
+		}
+
+		// Check for Ethiopian Government pattern
+		if govEtRegex.MatchString(line) {
+			etgovLines = append(etgovLines, line)
+		}
+
 		// Check if line matches betting patterns and exclude .gov domains
 		if (re1.MatchString(line) || re2.MatchString(line)) && !strings.Contains(line, ".gov") {
 			if _, err := fmt.Fprintln(bettingOut, line); err != nil {
@@ -2569,8 +2620,71 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 		return fmt.Errorf("error reading input file: %w", err)
 	}
 
+	// Write new Ethiopian-specific pattern files (only if matches found)
+	var ethioTeleCount, cpanelCount, jackbotCount, etgovCount int
+
+	if len(ethioTeleLines) > 0 {
+		ethioTeleOut, err := os.OpenFile(ethioTeleFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return fmt.Errorf("error opening ethiotele output file: %w", err)
+		}
+		for _, line := range ethioTeleLines {
+			fmt.Fprintln(ethioTeleOut, line)
+		}
+		ethioTeleOut.Close()
+		ethioTeleCount = len(ethioTeleLines)
+	}
+
+	if len(cpanelLines) > 0 {
+		cpanelOut, err := os.OpenFile(cpanelFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return fmt.Errorf("error opening cpanel output file: %w", err)
+		}
+		for _, line := range cpanelLines {
+			fmt.Fprintln(cpanelOut, line)
+		}
+		cpanelOut.Close()
+		cpanelCount = len(cpanelLines)
+	}
+
+	if len(jackbotLines) > 0 {
+		jackbotOut, err := os.OpenFile(jackbotFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return fmt.Errorf("error opening jackbot output file: %w", err)
+		}
+		for _, line := range jackbotLines {
+			fmt.Fprintln(jackbotOut, line)
+		}
+		jackbotOut.Close()
+		jackbotCount = len(jackbotLines)
+	}
+
+	if len(etgovLines) > 0 {
+		etgovOut, err := os.OpenFile(etgovFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return fmt.Errorf("error opening etgov output file: %w", err)
+		}
+		for _, line := range etgovLines {
+			fmt.Fprintln(etgovOut, line)
+		}
+		etgovOut.Close()
+		etgovCount = len(etgovLines)
+	}
+
 	s.log("✓ Extracted %d betting URLs to %s", extractedCount, bettingFile)
 	s.log("✓ Extracted %d priority sites to %s", priorityCount, priorityFile)
+	if ethioTeleCount > 0 {
+		s.log("✓ Extracted %d Ethiopian Telecom sites to %s", ethioTeleCount, ethioTeleFile)
+	}
+	if cpanelCount > 0 {
+		s.log("✓ Extracted %d cPanel sites to %s", cpanelCount, cpanelFile)
+	}
+	if jackbotCount > 0 {
+		s.log("✓ Extracted %d Jackbot betting sites to %s", jackbotCount, jackbotFile)
+	}
+	if etgovCount > 0 {
+		s.log("✓ Extracted %d Ethiopian Government sites to %s", etgovCount, etgovFile)
+	}
 
 	// Send files to bot if bot sender is configured
 	if s.botSender != nil && s.adminChatID != 0 {
@@ -2589,7 +2703,7 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 		
 		// Send priority file
 		if priorityCount > 0 {
-			caption := fmt.Sprintf("⭐ Priority Sites Extract\n📊 %d priority sites found\n🕐 %s", 
+			caption := fmt.Sprintf("⭐ Priority Sites Extract\n📊 %d priority sites found\n🕐 %s",
 				priorityCount, time.Now().Format("2006-01-02 15:04:05"))
 			if err := s.botSender.SendDocument(s.adminChatID, priorityFile, caption); err != nil {
 				s.log("⚠️ Failed to send priority file to bot: %v", err)
@@ -2597,12 +2711,58 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 				s.log("✅ Priority file sent to bot successfully")
 			}
 		}
+
+		// Send Ethiopian Telecom file
+		if ethioTeleCount > 0 {
+			caption := fmt.Sprintf("📡 Ethiopian Telecom Extract\n📊 %d ethiotelecom.et sites found\n🕐 %s",
+				ethioTeleCount, time.Now().Format("2006-01-02 15:04:05"))
+			if err := s.botSender.SendDocument(s.adminChatID, ethioTeleFile, caption); err != nil {
+				s.log("⚠️ Failed to send ethiotele file to bot: %v", err)
+			} else {
+				s.log("✅ Ethiopian Telecom file sent to bot successfully")
+			}
+		}
+
+		// Send cPanel file
+		if cpanelCount > 0 {
+			caption := fmt.Sprintf("⚙️ cPanel Admin Extract\n📊 %d cPanel admin sites found\n🕐 %s",
+				cpanelCount, time.Now().Format("2006-01-02 15:04:05"))
+			if err := s.botSender.SendDocument(s.adminChatID, cpanelFile, caption); err != nil {
+				s.log("⚠️ Failed to send cpanel file to bot: %v", err)
+			} else {
+				s.log("✅ cPanel file sent to bot successfully")
+			}
+		}
+
+		// Send Jackbot file
+		if jackbotCount > 0 {
+			caption := fmt.Sprintf("🎰 Ethiopian Betting Dashboard Extract\n📊 %d dashboard.bet.et sites found\n🕐 %s",
+				jackbotCount, time.Now().Format("2006-01-02 15:04:05"))
+			if err := s.botSender.SendDocument(s.adminChatID, jackbotFile, caption); err != nil {
+				s.log("⚠️ Failed to send jackbot file to bot: %v", err)
+			} else {
+				s.log("✅ Jackbot file sent to bot successfully")
+			}
+		}
+
+		// Send Ethiopian Government file
+		if etgovCount > 0 {
+			caption := fmt.Sprintf("🏛️ Ethiopian Government Extract\n📊 %d gov.et sites found\n🕐 %s",
+				etgovCount, time.Now().Format("2006-01-02 15:04:05"))
+			if err := s.botSender.SendDocument(s.adminChatID, etgovFile, caption); err != nil {
+				s.log("⚠️ Failed to send etgov file to bot: %v", err)
+			} else {
+				s.log("✅ Ethiopian Government file sent to bot successfully")
+			}
+		}
 	} else {
 		s.log("ℹ️ Bot sender not configured - skipping file transmission")
 	}
 
 	// Move files to backup directory after sending
-	if err := s.moveFilesToBackup(bettingFile, priorityFile, extractedCount, priorityCount); err != nil {
+	if err := s.moveFilesToBackup(
+		bettingFile, priorityFile, ethioTeleFile, cpanelFile, jackbotFile, etgovFile,
+		extractedCount, priorityCount, ethioTeleCount, cpanelCount, jackbotCount, etgovCount); err != nil {
 		s.log("⚠️ Failed to move files to backup: %v", err)
 	}
 
@@ -2610,7 +2770,9 @@ func (s *StoreService) runValuableStage(ctx context.Context) error {
 }
 
 // moveFilesToBackup moves betting and priority files to the backup directory
-func (s *StoreService) moveFilesToBackup(bettingFile, priorityFile string, bettingCount, priorityCount int) error {
+func (s *StoreService) moveFilesToBackup(
+	bettingFile, priorityFile, ethioTeleFile, cpanelFile, jackbotFile, etgovFile string,
+	bettingCount, priorityCount, ethioTeleCount, cpanelCount, jackbotCount, etgovCount int) error {
 	// Create backup directory
 	backupDir := filepath.Join("app/extraction/files/backups")
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
@@ -2618,7 +2780,7 @@ func (s *StoreService) moveFilesToBackup(bettingFile, priorityFile string, betti
 	}
 
 	var moveErrors []error
-	
+
 	// Move betting file to backup if it exists and has content
 	if bettingCount > 0 {
 		if _, err := os.Stat(bettingFile); err == nil {
@@ -2630,7 +2792,7 @@ func (s *StoreService) moveFilesToBackup(bettingFile, priorityFile string, betti
 			}
 		}
 	}
-	
+
 	// Move priority file to backup if it exists and has content
 	if priorityCount > 0 {
 		if _, err := os.Stat(priorityFile); err == nil {
@@ -2642,7 +2804,55 @@ func (s *StoreService) moveFilesToBackup(bettingFile, priorityFile string, betti
 			}
 		}
 	}
-	
+
+	// Move Ethiopian Telecom file to backup if it exists and has content
+	if ethioTeleCount > 0 {
+		if _, err := os.Stat(ethioTeleFile); err == nil {
+			backupPath := filepath.Join(backupDir, filepath.Base(ethioTeleFile))
+			if err := os.Rename(ethioTeleFile, backupPath); err != nil {
+				moveErrors = append(moveErrors, fmt.Errorf("failed to move ethiotele file to backup: %w", err))
+			} else {
+				s.log("✅ Moved Ethiopian Telecom file to backup: %s", backupPath)
+			}
+		}
+	}
+
+	// Move cPanel file to backup if it exists and has content
+	if cpanelCount > 0 {
+		if _, err := os.Stat(cpanelFile); err == nil {
+			backupPath := filepath.Join(backupDir, filepath.Base(cpanelFile))
+			if err := os.Rename(cpanelFile, backupPath); err != nil {
+				moveErrors = append(moveErrors, fmt.Errorf("failed to move cpanel file to backup: %w", err))
+			} else {
+				s.log("✅ Moved cPanel file to backup: %s", backupPath)
+			}
+		}
+	}
+
+	// Move Jackbot file to backup if it exists and has content
+	if jackbotCount > 0 {
+		if _, err := os.Stat(jackbotFile); err == nil {
+			backupPath := filepath.Join(backupDir, filepath.Base(jackbotFile))
+			if err := os.Rename(jackbotFile, backupPath); err != nil {
+				moveErrors = append(moveErrors, fmt.Errorf("failed to move jackbot file to backup: %w", err))
+			} else {
+				s.log("✅ Moved Jackbot file to backup: %s", backupPath)
+			}
+		}
+	}
+
+	// Move Ethiopian Government file to backup if it exists and has content
+	if etgovCount > 0 {
+		if _, err := os.Stat(etgovFile); err == nil {
+			backupPath := filepath.Join(backupDir, filepath.Base(etgovFile))
+			if err := os.Rename(etgovFile, backupPath); err != nil {
+				moveErrors = append(moveErrors, fmt.Errorf("failed to move etgov file to backup: %w", err))
+			} else {
+				s.log("✅ Moved Ethiopian Government file to backup: %s", backupPath)
+			}
+		}
+	}
+
 	// Return combined errors if any
 	if len(moveErrors) > 0 {
 		var errMsg string
@@ -2654,7 +2864,7 @@ func (s *StoreService) moveFilesToBackup(bettingFile, priorityFile string, betti
 		}
 		return fmt.Errorf("backup errors: %s", errMsg)
 	}
-	
+
 	s.log("✅ All files successfully moved to backup directory")
 	return nil
 }
@@ -3035,7 +3245,7 @@ func lineIsValid(line string) (string, bool, string) {
 		}
 	}
 
-	// Check 4: Alphanumeric character count check - line must contain at least 20 alphanumeric characters
+	// Check 4: Alphanumeric character count check - line must contain at least 10 alphanumeric characters
 	alphanumericCount := 0
 	for _, char := range normalizedLine {
 		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
@@ -3043,7 +3253,7 @@ func lineIsValid(line string) (string, bool, string) {
 		}
 	}
 
-	if alphanumericCount < 20 {
+	if alphanumericCount < 10 {
 		return normalizedLine, false, "insufficient_alphanumeric"
 	}
 
