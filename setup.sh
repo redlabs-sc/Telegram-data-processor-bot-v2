@@ -34,6 +34,7 @@ NC='\033[0m' # No Color
 SKIP_DB=false
 SKIP_BUILD=false
 DEV_MODE=false
+AUTO_YES=false
 
 #=============================================================================
 # Utility Functions
@@ -75,6 +76,13 @@ die() {
 
 confirm() {
     local prompt="$1"
+
+    # Auto-yes mode bypasses confirmation
+    if ${AUTO_YES}; then
+        log_info "${prompt} [AUTO-YES]"
+        return 0
+    fi
+
     read -r -p "${prompt} [y/N] " response
     case "$response" in
         [yY][eE][sS]|[yY])
@@ -86,11 +94,80 @@ confirm() {
     esac
 }
 
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        echo "${ID}"
+    elif [[ -f /etc/redhat-release ]]; then
+        echo "rhel"
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        echo "macos"
+    else
+        echo "unknown"
+    fi
+}
+
+install_package() {
+    local package="$1"
+    local os=$(detect_os)
+
+    log_info "Attempting to install ${package}..."
+
+    case "${os}" in
+        ubuntu|debian)
+            sudo apt-get update >> "${LOG_FILE}" 2>&1
+            sudo apt-get install -y "${package}" >> "${LOG_FILE}" 2>&1
+            ;;
+        fedora|rhel|centos)
+            sudo dnf install -y "${package}" >> "${LOG_FILE}" 2>&1 || \
+            sudo yum install -y "${package}" >> "${LOG_FILE}" 2>&1
+            ;;
+        arch|manjaro)
+            sudo pacman -Sy --noconfirm "${package}" >> "${LOG_FILE}" 2>&1
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew install "${package}" >> "${LOG_FILE}" 2>&1
+            else
+                die "Homebrew not found. Please install ${package} manually."
+            fi
+            ;;
+        *)
+            die "Unknown OS. Please install ${package} manually."
+            ;;
+    esac
+
+    if [[ $? -eq 0 ]]; then
+        log_success "${package} installed successfully"
+        return 0
+    else
+        log_error "Failed to install ${package}"
+        return 1
+    fi
+}
+
 check_command() {
     local cmd="$1"
     local package="${2:-$1}"
+    local auto_install="${3:-true}"
+
     if ! command -v "${cmd}" &> /dev/null; then
-        die "${cmd} not found. Please install ${package} first."
+        log_warning "${cmd} not found"
+
+        if [[ "${auto_install}" == "true" ]]; then
+            if confirm "Would you like to install ${package}?"; then
+                install_package "${package}" || die "Failed to install ${package}. Please install manually."
+
+                # Verify installation
+                if ! command -v "${cmd}" &> /dev/null; then
+                    die "${cmd} installation failed. Please install ${package} manually."
+                fi
+            else
+                die "${cmd} is required. Please install ${package} and try again."
+            fi
+        else
+            die "${cmd} not found. Please install ${package} first."
+        fi
     fi
 }
 
@@ -116,14 +193,32 @@ parse_args() {
                 log_info "Running in development mode"
                 shift
                 ;;
+            -y|--yes)
+                AUTO_YES=true
+                log_info "Auto-yes mode enabled (no confirmations)"
+                shift
+                ;;
             -h|--help)
-                echo "Usage: $0 [OPTIONS]"
-                echo ""
-                echo "Options:"
-                echo "  --skip-db      Skip database setup and migrations"
-                echo "  --skip-build   Skip building the coordinator"
-                echo "  --dev          Run in development mode (foreground, verbose)"
-                echo "  -h, --help     Show this help message"
+                cat << EOF
+========================================
+Telegram Bot Coordinator - Setup Script
+========================================
+
+Usage: $0 [OPTIONS]
+
+Options:
+  --skip-db      Skip database setup and migrations
+  --skip-build   Skip building the coordinator
+  --dev          Run in development mode (foreground, verbose)
+  -y, --yes      Auto-yes mode (no confirmations, auto-install)
+  -h, --help     Show this help message
+
+Examples:
+  $0                    # Interactive setup
+  $0 --yes              # Fully autonomous setup
+  $0 --skip-db --dev    # Skip DB setup and run in foreground
+
+EOF
                 exit 0
                 ;;
             *)
@@ -137,15 +232,146 @@ parse_args() {
 # Prerequisites Check
 #=============================================================================
 
+start_postgresql() {
+    local os=$(detect_os)
+
+    log_info "Attempting to start PostgreSQL..."
+
+    case "${os}" in
+        ubuntu|debian)
+            sudo systemctl start postgresql >> "${LOG_FILE}" 2>&1 || \
+            sudo service postgresql start >> "${LOG_FILE}" 2>&1
+            ;;
+        fedora|rhel|centos)
+            sudo systemctl start postgresql >> "${LOG_FILE}" 2>&1
+            ;;
+        arch|manjaro)
+            sudo systemctl start postgresql >> "${LOG_FILE}" 2>&1
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew services start postgresql >> "${LOG_FILE}" 2>&1 || \
+                pg_ctl -D /usr/local/var/postgres start >> "${LOG_FILE}" 2>&1
+            else
+                pg_ctl -D /usr/local/var/postgres start >> "${LOG_FILE}" 2>&1
+            fi
+            ;;
+        *)
+            log_warning "Unknown OS. Trying systemctl..."
+            sudo systemctl start postgresql >> "${LOG_FILE}" 2>&1
+            ;;
+    esac
+
+    # Wait for PostgreSQL to be ready
+    local max_wait=30
+    local waited=0
+    while ! pg_isready -h localhost > /dev/null 2>&1; do
+        if [[ ${waited} -ge ${max_wait} ]]; then
+            return 1
+        fi
+        sleep 1
+        ((waited++))
+    done
+
+    return 0
+}
+
+check_postgresql() {
+    # First check if PostgreSQL client tools are installed
+    if ! command -v psql &> /dev/null; then
+        log_warning "PostgreSQL client (psql) not found"
+        if confirm "Would you like to install PostgreSQL?"; then
+            local os=$(detect_os)
+            case "${os}" in
+                ubuntu|debian)
+                    install_package "postgresql postgresql-contrib"
+                    ;;
+                fedora|rhel|centos)
+                    install_package "postgresql-server postgresql-contrib"
+                    # Initialize database for RHEL-based systems
+                    sudo postgresql-setup --initdb >> "${LOG_FILE}" 2>&1 || true
+                    ;;
+                arch|manjaro)
+                    install_package "postgresql"
+                    # Initialize database for Arch-based systems
+                    sudo -u postgres initdb -D /var/lib/postgres/data >> "${LOG_FILE}" 2>&1 || true
+                    ;;
+                macos)
+                    install_package "postgresql"
+                    ;;
+                *)
+                    die "Unable to install PostgreSQL automatically. Please install manually."
+                    ;;
+            esac
+        else
+            die "PostgreSQL is required. Please install it and try again."
+        fi
+    fi
+
+    # Check if createdb is available
+    if ! command -v createdb &> /dev/null; then
+        log_warning "createdb command not found (part of postgresql)"
+        local os=$(detect_os)
+        case "${os}" in
+            ubuntu|debian)
+                install_package "postgresql-client-common"
+                ;;
+            *)
+                log_warning "createdb should be part of postgresql package"
+                ;;
+        esac
+    fi
+
+    # Check if pg_isready is available
+    if ! command -v pg_isready &> /dev/null; then
+        log_warning "pg_isready not found, using alternative check"
+    fi
+
+    # Check if PostgreSQL is running
+    if command -v pg_isready &> /dev/null; then
+        if ! pg_isready -h localhost > /dev/null 2>&1; then
+            log_warning "PostgreSQL is not running"
+
+            if confirm "Would you like to start PostgreSQL?"; then
+                if start_postgresql; then
+                    log_success "PostgreSQL started successfully"
+                else
+                    die "Failed to start PostgreSQL. Please start it manually with: sudo systemctl start postgresql"
+                fi
+            else
+                die "PostgreSQL must be running. Please start it with: sudo systemctl start postgresql"
+            fi
+        else
+            log_success "PostgreSQL is running"
+        fi
+    else
+        # Fallback check using psql
+        if ! psql -h localhost -U postgres -c "SELECT 1" > /dev/null 2>&1 && \
+           ! psql -h localhost -c "SELECT 1" > /dev/null 2>&1; then
+            log_warning "Cannot connect to PostgreSQL"
+
+            if confirm "Would you like to start PostgreSQL?"; then
+                if start_postgresql; then
+                    log_success "PostgreSQL started successfully"
+                else
+                    die "Failed to start PostgreSQL. Please start it manually."
+                fi
+            else
+                die "PostgreSQL must be running."
+            fi
+        else
+            log_success "PostgreSQL is accessible"
+        fi
+    fi
+}
+
 check_prerequisites() {
     log_info "Checking prerequisites..."
 
-    # Check required commands
-    check_command "go" "golang (>= 1.24)"
-    check_command "psql" "postgresql-client"
-    check_command "createdb" "postgresql"
-    check_command "jq" "jq"
-    check_command "curl" "curl"
+    # Check Go (don't auto-install - too complex)
+    if ! command -v go &> /dev/null; then
+        die "Go is not installed. Please install Go 1.24+ from https://golang.org/dl/"
+    fi
 
     # Check Go version
     local go_version=$(go version | grep -oP '(?<=go)\d+\.\d+' || echo "0.0")
@@ -157,12 +383,13 @@ check_prerequisites() {
 
     log_success "Go ${go_version} found"
 
-    # Check PostgreSQL
-    if ! pg_isready -h localhost > /dev/null 2>&1; then
-        die "PostgreSQL is not running. Please start PostgreSQL first."
-    fi
+    # Check PostgreSQL (with auto-install and auto-start)
+    check_postgresql
 
-    log_success "PostgreSQL is running"
+    # Check optional tools (with auto-install)
+    check_command "jq" "jq" "true"
+    check_command "curl" "curl" "true"
+    check_command "lsof" "lsof" "true"
 }
 
 #=============================================================================

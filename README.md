@@ -7,11 +7,14 @@ A high-performance Telegram bot that processes large volumes of files through a 
 ### One-Command Setup
 
 ```bash
-./setup.sh
+./setup.sh              # Interactive setup (asks for confirmations)
+./setup.sh --yes        # Fully autonomous (auto-install, no prompts)
 ```
 
 This will automatically:
 - ✅ Check prerequisites (Go, PostgreSQL, etc.)
+- ✅ **Auto-install** missing packages (jq, curl, lsof)
+- ✅ **Auto-start** PostgreSQL if not running
 - ✅ Set up database and run migrations
 - ✅ Create required directories
 - ✅ Build the coordinator
@@ -21,9 +24,12 @@ This will automatically:
 ### Management Scripts
 
 ```bash
-./setup.sh      # Setup and start everything
-./stop.sh       # Stop all services gracefully
-./status.sh     # Show detailed system status
+./setup.sh              # Interactive setup
+./setup.sh --yes        # Fully autonomous setup
+./setup.sh --skip-db    # Skip database setup
+./setup.sh --dev        # Run in development mode (foreground)
+./stop.sh               # Stop all services gracefully
+./status.sh             # Show detailed system status
 ```
 
 ## 📋 Prerequisites

@@ -2,12 +2,30 @@
 
 This guide will help you get the Telegram Bot Coordinator running with the new pipelined multi-round architecture.
 
+## Fully Autonomous Setup (Recommended)
+
+```bash
+./setup.sh --yes
+```
+
+This will automatically:
+- ✅ Install missing packages (jq, curl, lsof)
+- ✅ Install PostgreSQL if not found
+- ✅ Start PostgreSQL if not running
+- ✅ Set up database and migrations
+- ✅ Build and start the coordinator
+- ✅ Verify system health
+
+**No manual intervention required!**
+
 ## Prerequisites
 
-- **Go 1.24+** installed
-- **PostgreSQL 14+** running
-- **Telegram Bot Token** from @BotFather
-- **Admin User IDs** (your Telegram user ID)
+The setup script will handle most of these automatically:
+
+- **Go 1.24+** (must be pre-installed - download from https://golang.org/dl/)
+- **PostgreSQL 14+** (auto-installed if missing)
+- **Telegram Bot Token** from @BotFather (configure in .env)
+- **Admin User IDs** (your Telegram user ID - configure in .env)
 - **Optional**: Local Bot API Server for files >20MB
 
 ## Step 1: Database Setup
