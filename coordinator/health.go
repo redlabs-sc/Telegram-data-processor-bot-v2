@@ -104,7 +104,7 @@ func (h *HealthChecker) checkDatabase() string {
 
 func (h *HealthChecker) checkFilesystem() string {
 	// Check if we can write to critical directories
-	dirs := []string{"batches", "downloads", "logs"}
+	dirs := []string{"downloads", "store_tasks", "logs"}
 
 	for _, dir := range dirs {
 		testFile := dir + "/.health_check"
