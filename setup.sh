@@ -546,18 +546,32 @@ verify_and_repair_privileges() {
 
     log_warning "User lacks sufficient privileges. Attempting to repair..."
 
-    # Try to grant privileges
+    # Try to grant privileges (including schema permissions for PostgreSQL 15+)
     if sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};" >> "${LOG_FILE}" 2>&1; then
+        # CRITICAL: Grant schema permissions (required for PostgreSQL 15+)
+        sudo -u postgres psql -d "${db_name}" -c "GRANT USAGE, CREATE ON SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         sudo -u postgres psql -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         sudo -u postgres psql -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         sudo -u postgres psql -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${db_user};" >> "${LOG_FILE}" 2>&1
         sudo -u postgres psql -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${db_user};" >> "${LOG_FILE}" 2>&1
         log_success "Privileges repaired successfully"
-        return 0
+
+        # Verify the fix worked
+        if PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" \
+            -c "CREATE TABLE IF NOT EXISTS _test_privileges (id int); DROP TABLE IF EXISTS _test_privileges;" >> "${LOG_FILE}" 2>&1; then
+            log_success "Privilege repair verified - user can now create tables"
+            return 0
+        else
+            log_error "Privilege repair completed but user still cannot create tables"
+            log_error "This may be a PostgreSQL configuration issue"
+            return 1
+        fi
     fi
 
     log_error "Failed to repair privileges automatically"
-    log_error "Run manually: sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};\""
+    log_error "Run manually:"
+    log_error "  sudo -u postgres psql -d ${db_name} -c \"GRANT USAGE, CREATE ON SCHEMA public TO ${db_user};\""
+    log_error "  sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};\""
     return 1
 }
 
@@ -755,6 +769,8 @@ setup_database() {
     if ${use_sudo}; then
         sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};" >> "${LOG_FILE}" 2>&1 || \
             log_warning "Could not grant database privileges (may already be set)"
+        # CRITICAL: Grant schema permissions for PostgreSQL 15+
+        sudo -u postgres psql -d "${db_name}" -c "GRANT USAGE, CREATE ON SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         sudo -u postgres psql -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         sudo -u postgres psql -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         sudo -u postgres psql -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${db_user};" >> "${LOG_FILE}" 2>&1
@@ -762,6 +778,8 @@ setup_database() {
     else
         psql -h "${db_host}" -p "${db_port}" -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};" >> "${LOG_FILE}" 2>&1 || \
             log_warning "Could not grant database privileges (may already be set)"
+        # CRITICAL: Grant schema permissions for PostgreSQL 15+
+        psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "GRANT USAGE, CREATE ON SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
         psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${db_user};" >> "${LOG_FILE}" 2>&1
