@@ -703,7 +703,11 @@ build_coordinator() {
 
     log_info "Building coordinator..."
 
+    # Ensure we're in project root
     cd "${PROJECT_ROOT}"
+
+    # Ensure logs directory exists
+    mkdir -p "${PROJECT_ROOT}/logs"
 
     # Clean dependencies
     log_info "  Cleaning Go module cache..."
@@ -711,14 +715,16 @@ build_coordinator() {
 
     # Build
     log_info "  Compiling coordinator binary..."
-    cd "${PROJECT_ROOT}/coordinator"
+
+    # Build from project root to avoid path issues
+    cd "${PROJECT_ROOT}"
 
     if ${DEV_MODE}; then
         # Development build (faster, with debug info)
-        go build -o telegram-bot-coordinator >> "${LOG_FILE}" 2>&1 || die "Build failed"
+        (cd coordinator && go build -o telegram-bot-coordinator) >> "${LOG_FILE}" 2>&1 || die "Build failed"
     else
         # Production build (optimized)
-        go build -ldflags="-s -w" -o telegram-bot-coordinator >> "${LOG_FILE}" 2>&1 || die "Build failed"
+        (cd coordinator && go build -ldflags="-s -w" -o telegram-bot-coordinator) >> "${LOG_FILE}" 2>&1 || die "Build failed"
     fi
 
     # Verify binary
