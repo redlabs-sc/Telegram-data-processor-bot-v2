@@ -200,10 +200,6 @@ parse_args() {
                 ;;
             -h|--help)
                 cat << EOF
-========================================
-Telegram Bot Coordinator - Setup Script
-========================================
-
 Usage: $0 [OPTIONS]
 
 Options:
