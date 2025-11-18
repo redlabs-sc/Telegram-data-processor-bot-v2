@@ -66,6 +66,7 @@ tmp/
 temp/
 
 # Telegram Local Bot API Server
+telegram-bot-api/
 telegram-bot-api-data/
 telegram-bot-api.pid
 coordinator.pid

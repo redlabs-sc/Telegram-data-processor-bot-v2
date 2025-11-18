@@ -999,6 +999,102 @@ stop_existing_services() {
 # Telegram Local Bot API Server Management
 #=============================================================================
 
+install_telegram_bot_api() {
+    log_info "Installing Telegram Bot API Server..."
+
+    local os=$(detect_os)
+
+    # Ask for confirmation unless --yes flag
+    if ! ${AUTO_YES}; then
+        log_warning "telegram-bot-api needs to be built from source (this may take 10-20 minutes)"
+        read -p "Do you want to install it now? [y/N] " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_error "telegram-bot-api is required for Local Bot API Server"
+            log_error "Install manually from: https://github.com/tdlib/telegram-bot-api"
+            die "Installation cancelled by user"
+        fi
+    fi
+
+    # Install build dependencies based on OS
+    log_info "  Installing build dependencies..."
+
+    case "${os}" in
+        ubuntu|debian)
+            sudo apt-get update >> "${LOG_FILE}" 2>&1
+            sudo apt-get install -y make git zlib1g-dev libssl-dev gperf cmake g++ >> "${LOG_FILE}" 2>&1 || die "Failed to install build dependencies"
+            ;;
+        fedora)
+            sudo dnf install -y make git zlib-devel openssl-devel gperf cmake gcc-c++ >> "${LOG_FILE}" 2>&1 || die "Failed to install build dependencies"
+            ;;
+        centos|rhel|rocky|almalinux)
+            sudo yum install -y make git zlib-devel openssl-devel gperf cmake gcc-c++ >> "${LOG_FILE}" 2>&1 || die "Failed to install build dependencies"
+            ;;
+        arch|manjaro)
+            sudo pacman -S --noconfirm make git zlib openssl gperf cmake gcc >> "${LOG_FILE}" 2>&1 || die "Failed to install build dependencies"
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew install openssl cmake gperf >> "${LOG_FILE}" 2>&1 || die "Failed to install build dependencies"
+            else
+                die "Homebrew is required on macOS. Install from https://brew.sh"
+            fi
+            ;;
+        *)
+            log_error "Unsupported OS for auto-installation: ${os}"
+            log_error "Please install build dependencies manually:"
+            log_error "  - make, git, zlib-dev, openssl-dev, gperf, cmake, g++"
+            die "Cannot auto-install on ${os}"
+            ;;
+    esac
+
+    log_success "  Build dependencies installed"
+
+    # Clone telegram-bot-api repository
+    local build_dir="${PROJECT_ROOT}/telegram-bot-api"
+
+    if [[ -d "${build_dir}" ]]; then
+        log_info "  Updating existing telegram-bot-api source..."
+        (cd "${build_dir}" && git pull --recurse-submodules) >> "${LOG_FILE}" 2>&1 || true
+    else
+        log_info "  Cloning telegram-bot-api repository..."
+        git clone --recursive https://github.com/tdlib/telegram-bot-api.git "${build_dir}" >> "${LOG_FILE}" 2>&1 || die "Failed to clone repository"
+    fi
+
+    # Build telegram-bot-api
+    log_info "  Building telegram-bot-api (this may take 10-20 minutes)..."
+
+    mkdir -p "${build_dir}/build"
+    cd "${build_dir}/build"
+
+    # Configure with cmake
+    if [[ "${os}" == "macos" ]]; then
+        cmake -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl/ .. >> "${LOG_FILE}" 2>&1 || die "cmake configuration failed"
+    else
+        cmake -DCMAKE_BUILD_TYPE=Release .. >> "${LOG_FILE}" 2>&1 || die "cmake configuration failed"
+    fi
+
+    # Build (use multiple cores if available)
+    local num_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+    cmake --build . -j "${num_cores}" >> "${LOG_FILE}" 2>&1 || die "Build failed"
+
+    log_success "  telegram-bot-api built successfully"
+
+    # Try to install system-wide (optional, may fail without sudo)
+    log_info "  Attempting system-wide installation..."
+    if sudo cmake --build . --target install >> "${LOG_FILE}" 2>&1; then
+        log_success "  telegram-bot-api installed to /usr/local/bin"
+    else
+        log_warning "  System-wide installation failed (will use local binary)"
+        log_info "  Binary location: ${build_dir}/build/telegram-bot-api"
+    fi
+
+    # Return to project root
+    cd "${PROJECT_ROOT}"
+
+    log_success "Telegram Bot API Server installation complete"
+}
+
 start_local_bot_api() {
     log_info "Setting up Telegram Local Bot API Server..."
 
@@ -1046,7 +1142,7 @@ start_local_bot_api() {
 
     if [[ -z "${bot_api_bin}" ]]; then
         # Check common installation paths
-        for path in "/usr/local/bin/telegram-bot-api" "/usr/bin/telegram-bot-api" "${HOME}/telegram-bot-api/bin/telegram-bot-api"; do
+        for path in "/usr/local/bin/telegram-bot-api" "/usr/bin/telegram-bot-api" "${HOME}/telegram-bot-api/bin/telegram-bot-api" "${PROJECT_ROOT}/telegram-bot-api/build/telegram-bot-api"; do
             if [[ -x "${path}" ]]; then
                 bot_api_bin="${path}"
                 break
@@ -1055,16 +1151,23 @@ start_local_bot_api() {
     fi
 
     if [[ -z "${bot_api_bin}" ]]; then
-        log_error "telegram-bot-api binary not found!"
-        log_error "Please install it from: https://github.com/tdlib/telegram-bot-api"
-        log_error ""
-        log_error "Quick install (Ubuntu/Debian):"
-        log_error "  sudo apt-get install -y make git zlib1g-dev libssl-dev gperf cmake g++"
-        log_error "  git clone --recursive https://github.com/tdlib/telegram-bot-api.git"
-        log_error "  cd telegram-bot-api && mkdir build && cd build"
-        log_error "  cmake -DCMAKE_BUILD_TYPE=Release .."
-        log_error "  cmake --build . --target install"
-        die "telegram-bot-api binary not found"
+        log_warning "telegram-bot-api binary not found"
+        install_telegram_bot_api
+
+        # Check again after installation
+        bot_api_bin=$(which telegram-bot-api 2>/dev/null || echo "")
+        if [[ -z "${bot_api_bin}" ]]; then
+            for path in "/usr/local/bin/telegram-bot-api" "${PROJECT_ROOT}/telegram-bot-api/build/telegram-bot-api"; do
+                if [[ -x "${path}" ]]; then
+                    bot_api_bin="${path}"
+                    break
+                fi
+            done
+        fi
+
+        if [[ -z "${bot_api_bin}" ]]; then
+            die "telegram-bot-api installation failed. Please install manually."
+        fi
     fi
 
     log_info "  Found telegram-bot-api: ${bot_api_bin}"
