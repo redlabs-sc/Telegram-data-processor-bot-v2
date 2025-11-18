@@ -590,6 +590,7 @@ run_database_migrations() {
     fi
 
     local migration_count=0
+    local skipped_count=0
     local failed_migrations=()
 
     for migration in "${migration_dir}"/*.sql; do
@@ -597,14 +598,39 @@ run_database_migrations() {
             local migration_name=$(basename "${migration}")
             log_info "  Applying ${migration_name}..."
 
-            if PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" \
-                -f "${migration}" >> "${LOG_FILE}" 2>&1; then
+            # Capture psql output to analyze errors
+            local migration_output
+            migration_output=$(PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" \
+                -U "${db_user}" -d "${db_name}" -f "${migration}" 2>&1)
+            local exit_code=$?
+
+            # Log the output for debugging
+            echo "${migration_output}" >> "${LOG_FILE}"
+
+            if [[ ${exit_code} -eq 0 ]]; then
+                # Migration succeeded
                 ((migration_count++))
             else
-                # Check if it's just "already exists" error (which is OK)
-                if grep -q "already exists" "${LOG_FILE}" 2>/dev/null; then
-                    log_warning "    ${migration_name} objects already exist (this is OK)"
+                # Check if ONLY "already exists" errors occurred
+                local has_already_exists=false
+                local has_other_errors=false
+
+                if echo "${migration_output}" | grep -qi "already exists"; then
+                    has_already_exists=true
+                fi
+
+                # Check for errors that are NOT "already exists"
+                # Look for ERROR: lines that don't contain "already exists"
+                if echo "${migration_output}" | grep -i "ERROR:" | grep -vqi "already exists"; then
+                    has_other_errors=true
+                fi
+
+                if [[ "${has_already_exists}" == "true" ]] && [[ "${has_other_errors}" == "false" ]]; then
+                    # Only "already exists" errors - this is OK
+                    log_warning "    ${migration_name} objects already exist (skipping)"
+                    ((skipped_count++))
                 else
+                    # Real errors occurred
                     log_error "    Failed to apply ${migration_name}"
                     failed_migrations+=("${migration_name}")
                 fi
@@ -615,11 +641,14 @@ run_database_migrations() {
     if [[ ${#failed_migrations[@]} -gt 0 ]]; then
         log_error "Some migrations failed: ${failed_migrations[*]}"
         log_error "Check ${LOG_FILE} for details"
-
-        # Non-fatal - some tables may already exist
-        log_warning "Continuing anyway - will verify table existence..."
+        return 1
     else
-        log_success "All migrations completed successfully (${migration_count} applied)"
+        if [[ ${skipped_count} -gt 0 ]]; then
+            log_success "Migrations complete: ${migration_count} applied, ${skipped_count} skipped (already exists)"
+        else
+            log_success "All migrations completed successfully (${migration_count} applied)"
+        fi
+        return 0
     fi
 }
 
