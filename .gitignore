@@ -64,3 +64,8 @@ vendor/
 # Temporary files
 tmp/
 temp/
+
+# Telegram Local Bot API Server
+telegram-bot-api-data/
+telegram-bot-api.pid
+coordinator.pid

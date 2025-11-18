@@ -68,7 +68,7 @@ func LoadConfig() (*Config, error) {
 		// Telegram
 		TelegramBotToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
 		AdminIDs:         parseAdminIDs(getEnv("ADMIN_IDS", "")),
-		UseLocalBotAPI:   getEnvBool("USE_LOCAL_BOT_API", false),
+		UseLocalBotAPI:   getEnvBool("USE_LOCAL_BOT_API", true),
 		LocalBotAPIURL:   getEnv("LOCAL_BOT_API_URL", "http://localhost:8081"),
 		MaxFileSizeMB:    getEnvInt64("MAX_FILE_SIZE_MB", 4096),
 

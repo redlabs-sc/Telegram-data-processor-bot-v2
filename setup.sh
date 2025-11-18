@@ -995,6 +995,118 @@ stop_existing_services() {
     fi
 }
 
+#=============================================================================
+# Telegram Local Bot API Server Management
+#=============================================================================
+
+start_local_bot_api() {
+    log_info "Setting up Telegram Local Bot API Server..."
+
+    # Check if USE_LOCAL_BOT_API is enabled
+    local use_local_api="${USE_LOCAL_BOT_API:-true}"
+    if [[ "${use_local_api}" != "true" ]]; then
+        log_info "Local Bot API Server is disabled (USE_LOCAL_BOT_API=false)"
+        return 0
+    fi
+
+    # Check for required API credentials
+    local api_id="${TELEGRAM_API_ID:-}"
+    local api_hash="${TELEGRAM_API_HASH:-}"
+
+    if [[ -z "${api_id}" ]] || [[ "${api_id}" == "your_api_id_here" ]]; then
+        die "TELEGRAM_API_ID is required for Local Bot API Server. Get it from https://my.telegram.org/apps"
+    fi
+
+    if [[ -z "${api_hash}" ]] || [[ "${api_hash}" == "your_api_hash_here" ]]; then
+        die "TELEGRAM_API_HASH is required for Local Bot API Server. Get it from https://my.telegram.org/apps"
+    fi
+
+    # Kill any existing telegram-bot-api processes
+    log_info "  Stopping existing telegram-bot-api processes..."
+    local pids=$(pgrep -f "telegram-bot-api" || true)
+
+    if [[ -n "${pids}" ]]; then
+        log_info "    Found existing processes: ${pids}"
+        echo "${pids}" | xargs kill -TERM 2>/dev/null || true
+        sleep 2
+
+        # Force kill if still running
+        pids=$(pgrep -f "telegram-bot-api" || true)
+        if [[ -n "${pids}" ]]; then
+            log_warning "    Force killing stubborn processes..."
+            echo "${pids}" | xargs kill -KILL 2>/dev/null || true
+        fi
+        log_success "  Existing telegram-bot-api stopped"
+    else
+        log_info "  No existing telegram-bot-api processes found"
+    fi
+
+    # Check if telegram-bot-api binary exists
+    local bot_api_bin=$(which telegram-bot-api 2>/dev/null || echo "")
+
+    if [[ -z "${bot_api_bin}" ]]; then
+        # Check common installation paths
+        for path in "/usr/local/bin/telegram-bot-api" "/usr/bin/telegram-bot-api" "${HOME}/telegram-bot-api/bin/telegram-bot-api"; do
+            if [[ -x "${path}" ]]; then
+                bot_api_bin="${path}"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "${bot_api_bin}" ]]; then
+        log_error "telegram-bot-api binary not found!"
+        log_error "Please install it from: https://github.com/tdlib/telegram-bot-api"
+        log_error ""
+        log_error "Quick install (Ubuntu/Debian):"
+        log_error "  sudo apt-get install -y make git zlib1g-dev libssl-dev gperf cmake g++"
+        log_error "  git clone --recursive https://github.com/tdlib/telegram-bot-api.git"
+        log_error "  cd telegram-bot-api && mkdir build && cd build"
+        log_error "  cmake -DCMAKE_BUILD_TYPE=Release .."
+        log_error "  cmake --build . --target install"
+        die "telegram-bot-api binary not found"
+    fi
+
+    log_info "  Found telegram-bot-api: ${bot_api_bin}"
+
+    # Create working directory for telegram-bot-api
+    local bot_api_dir="${PROJECT_ROOT}/telegram-bot-api-data"
+    mkdir -p "${bot_api_dir}"
+
+    # Start telegram-bot-api server
+    log_info "  Starting telegram-bot-api server on port 8081..."
+
+    nohup "${bot_api_bin}" \
+        --api-id="${api_id}" \
+        --api-hash="${api_hash}" \
+        --local \
+        --dir="${bot_api_dir}" \
+        --http-port=8081 \
+        > "${PROJECT_ROOT}/logs/telegram-bot-api.log" 2>&1 &
+
+    local pid=$!
+    echo "${pid}" > "${PROJECT_ROOT}/telegram-bot-api.pid"
+
+    log_info "  telegram-bot-api started (PID: ${pid})"
+
+    # Wait for it to be ready
+    log_info "  Waiting for telegram-bot-api to be ready..."
+    local max_wait=30
+    local waited=0
+
+    while ! curl -s -f "http://localhost:8081" > /dev/null 2>&1; do
+        if [[ ${waited} -ge ${max_wait} ]]; then
+            log_error "telegram-bot-api did not start within ${max_wait} seconds"
+            log_error "Check logs: tail -f ${PROJECT_ROOT}/logs/telegram-bot-api.log"
+            die "telegram-bot-api failed to start"
+        fi
+        sleep 1
+        ((waited++))
+    done
+
+    log_success "Telegram Local Bot API Server is ready (port 8081)"
+}
+
 start_coordinator() {
     log_info "Starting coordinator..."
 
@@ -1175,6 +1287,7 @@ main() {
 
     # Start services
     stop_existing_services
+    start_local_bot_api
 
     if ${DEV_MODE}; then
         start_coordinator  # Will run in foreground
