@@ -6,6 +6,7 @@
 # Binaries
 telegram-bot-option2
 coordinator/coordinator
+coordinator/telegram-bot-coordinator
 *.exe
 *.dll
 *.so
@@ -15,15 +16,19 @@ coordinator/coordinator
 *.test
 *.out
 
-# Batch workspaces (auto-managed at runtime)
+# Round workspaces (deprecated - old batch-based architecture)
 batches/*
 !batches/.gitkeep
+
+# Store task workspaces (auto-managed at runtime)
+store_tasks/*
+!store_tasks/.gitkeep
 
 # Downloads (temporary storage)
 downloads/*
 !downloads/.gitkeep
 
-# Archive (failed batches)
+# Archive (failed rounds)
 archive/*
 !archive/.gitkeep
 !archive/failed/.gitkeep

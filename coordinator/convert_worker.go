@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	// Import preserved convert package
-	"github.com/redlabs-sc/telegram-bot/app/extraction/convert"
+	"github.com/redlabs-sc/telegram-bot-option2/app/extraction/convert"
 )
 
 // ConvertWorker is a singleton worker that processes rounds through the convert stage.

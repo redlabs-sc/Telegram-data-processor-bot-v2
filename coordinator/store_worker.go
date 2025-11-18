@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	// Import preserved extraction package (contains store functionality)
-	"github.com/redlabs-sc/telegram-bot/app/extraction"
+	"github.com/redlabs-sc/telegram-bot-option2/app/extraction"
 )
 
 // StoreTask represents a store task (2 files)
@@ -168,10 +168,13 @@ func runStoreTask(task *StoreTask, logger *zap.Logger) error {
 		zap.String("working_dir", taskDir))
 
 	storeCtx := context.Background()
-	storeService, err := extraction.NewStoreService()
-	if err != nil {
-		return fmt.Errorf("failed to create store service: %w", err)
+
+	// Create a logger function compatible with store.go's expected signature
+	logFunc := func(format string, args ...interface{}) {
+		logger.Info(fmt.Sprintf(format, args...))
 	}
+
+	storeService := extraction.NewStoreService(logFunc)
 
 	err = storeService.RunPipeline(storeCtx)
 	if err != nil {

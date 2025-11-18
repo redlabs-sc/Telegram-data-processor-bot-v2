@@ -272,8 +272,8 @@ func (dw *DownloadWorker) downloadFile(ctx context.Context, taskID int64, fileID
 		dw.logger.Warn("Failed to store hash", zap.Error(err))
 	}
 
-	// Record download speed metric
-	dw.metrics.RecordBatchDuration("download", int(duration.Seconds()))
+	// Record download duration metric
+	dw.metrics.RecordRoundDuration("download", int(duration.Seconds()))
 
 	return nil
 }

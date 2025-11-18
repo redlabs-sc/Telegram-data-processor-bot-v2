@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	// Import preserved extract package
-	"github.com/redlabs-sc/telegram-bot/app/extraction/extract"
+	"github.com/redlabs-sc/telegram-bot-option2/app/extraction/extract"
 )
 
 // ExtractWorker is a singleton worker that processes rounds through the extract stage.
