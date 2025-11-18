@@ -599,10 +599,15 @@ run_database_migrations() {
             log_info "  Applying ${migration_name}..."
 
             # Capture psql output to analyze errors
+            # Must disable set -e temporarily because psql returns non-zero on "already exists"
+            # which would cause immediate script exit before we can analyze the error
             local migration_output
+            local exit_code
+            set +e  # Disable exit on error
             migration_output=$(PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" \
                 -U "${db_user}" -d "${db_name}" -f "${migration}" 2>&1)
-            local exit_code=$?
+            exit_code=$?
+            set -e  # Re-enable exit on error
 
             # Log the output for debugging
             echo "${migration_output}" >> "${LOG_FILE}"
