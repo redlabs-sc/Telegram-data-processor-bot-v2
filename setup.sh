@@ -599,15 +599,20 @@ run_database_migrations() {
             log_info "  Applying ${migration_name}..."
 
             # Capture psql output to analyze errors
-            # Must disable set -e temporarily because psql returns non-zero on "already exists"
-            # which would cause immediate script exit before we can analyze the error
+            # Must disable set -e for the entire error analysis block because:
+            # 1. psql returns non-zero on "already exists" errors
+            # 2. grep -v returns non-zero when all lines are filtered out
+            # Either would cause immediate script exit before we can analyze the error
             local migration_output
             local exit_code
-            set +e  # Disable exit on error
+            local has_already_exists=false
+            local has_other_errors=false
+
+            set +e  # Disable exit on error for entire analysis block
+
             migration_output=$(PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" \
                 -U "${db_user}" -d "${db_name}" -f "${migration}" 2>&1)
             exit_code=$?
-            set -e  # Re-enable exit on error
 
             # Log the output for debugging
             echo "${migration_output}" >> "${LOG_FILE}"
@@ -616,16 +621,14 @@ run_database_migrations() {
                 # Migration succeeded
                 ((migration_count++))
             else
-                # Check if ONLY "already exists" errors occurred
-                local has_already_exists=false
-                local has_other_errors=false
-
+                # Check if "already exists" errors occurred
                 if echo "${migration_output}" | grep -qi "already exists"; then
                     has_already_exists=true
                 fi
 
                 # Check for errors that are NOT "already exists"
                 # Look for ERROR: lines that don't contain "already exists"
+                # Note: grep -v returns 1 if no lines match, so we use || true
                 if echo "${migration_output}" | grep -i "ERROR:" | grep -vqi "already exists"; then
                     has_other_errors=true
                 fi
@@ -640,6 +643,8 @@ run_database_migrations() {
                     failed_migrations+=("${migration_name}")
                 fi
             fi
+
+            set -e  # Re-enable exit on error
         fi
     done
 
