@@ -479,32 +479,132 @@ setup_database() {
     local db_host="${DB_HOST:-localhost}"
     local db_port="${DB_PORT:-5432}"
 
+    # Test if we can connect with existing credentials first
+    if PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" -c "SELECT 1" >> "${LOG_FILE}" 2>&1; then
+        log_success "Database ${db_name} already exists and accessible"
+
+        # Run migrations anyway (in case they weren't applied)
+        log_info "Running database migrations..."
+        local migration_dir="${PROJECT_ROOT}/database/migrations"
+
+        if [[ ! -d "${migration_dir}" ]]; then
+            die "Migrations directory not found: ${migration_dir}"
+        fi
+
+        for migration in "${migration_dir}"/*.sql; do
+            if [[ -f "${migration}" ]]; then
+                local migration_name=$(basename "${migration}")
+                log_info "  Applying ${migration_name}..."
+
+                PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" \
+                    -f "${migration}" >> "${LOG_FILE}" 2>&1 || \
+                    log_warning "    Migration ${migration_name} may have already been applied (this is OK)"
+            fi
+        done
+
+        log_success "Database migrations completed"
+
+        # Verify tables
+        verify_database_tables "${db_host}" "${db_port}" "${db_user}" "${db_password}" "${db_name}"
+        return 0
+    fi
+
+    # Database doesn't exist or isn't accessible - need to create it
+    log_info "Database not accessible. Setting up database and user..."
+
+    # Try to use sudo -u postgres for peer authentication (common on Linux)
+    local use_sudo=false
+    if sudo -u postgres psql -c "SELECT 1" >> "${LOG_FILE}" 2>&1; then
+        use_sudo=true
+        log_info "Using sudo for PostgreSQL administration (peer authentication)"
+    else
+        log_warning "Cannot use sudo for PostgreSQL. Will try direct connection."
+        log_warning "You may be prompted for the postgres user password."
+    fi
+
     # Check if database exists
-    if psql -h "${db_host}" -p "${db_port}" -U postgres -lqt | cut -d \| -f 1 | grep -qw "${db_name}"; then
+    local db_exists=false
+    if ${use_sudo}; then
+        if sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw "${db_name}"; then
+            db_exists=true
+        fi
+    else
+        if psql -h "${db_host}" -p "${db_port}" -U postgres -lqt 2>> "${LOG_FILE}" | cut -d \| -f 1 | grep -qw "${db_name}"; then
+            db_exists=true
+        fi
+    fi
+
+    if ${db_exists}; then
         log_success "Database ${db_name} already exists"
     else
         log_info "Creating database ${db_name}..."
-        createdb -h "${db_host}" -p "${db_port}" -U postgres "${db_name}" >> "${LOG_FILE}" 2>&1 || \
-            die "Failed to create database"
+        if ${use_sudo}; then
+            sudo -u postgres createdb "${db_name}" >> "${LOG_FILE}" 2>&1 || \
+                die "Failed to create database. Check ${LOG_FILE} for details."
+        else
+            createdb -h "${db_host}" -p "${db_port}" -U postgres "${db_name}" >> "${LOG_FILE}" 2>&1 || \
+                die "Failed to create database. You may need to configure PostgreSQL authentication or run: sudo -u postgres createdb ${db_name}"
+        fi
         log_success "Database created"
     fi
 
     # Check if user exists
-    if psql -h "${db_host}" -p "${db_port}" -U postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='${db_user}'" | grep -q 1; then
+    local user_exists=false
+    if ${use_sudo}; then
+        if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${db_user}'" 2>> "${LOG_FILE}" | grep -q 1; then
+            user_exists=true
+        fi
+    else
+        if psql -h "${db_host}" -p "${db_port}" -U postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='${db_user}'" 2>> "${LOG_FILE}" | grep -q 1; then
+            user_exists=true
+        fi
+    fi
+
+    if ${user_exists}; then
         log_success "User ${db_user} already exists"
+
+        # Update password in case it changed
+        log_info "Updating user password..."
+        if ${use_sudo}; then
+            sudo -u postgres psql -c "ALTER USER ${db_user} WITH PASSWORD '${db_password}';" >> "${LOG_FILE}" 2>&1
+        else
+            psql -h "${db_host}" -p "${db_port}" -U postgres -c "ALTER USER ${db_user} WITH PASSWORD '${db_password}';" >> "${LOG_FILE}" 2>&1
+        fi
     else
         log_info "Creating user ${db_user}..."
-        psql -h "${db_host}" -p "${db_port}" -U postgres -c "CREATE USER ${db_user} WITH PASSWORD '${db_password}';" >> "${LOG_FILE}" 2>&1 || \
-            die "Failed to create user"
+        if ${use_sudo}; then
+            sudo -u postgres psql -c "CREATE USER ${db_user} WITH PASSWORD '${db_password}';" >> "${LOG_FILE}" 2>&1 || \
+                die "Failed to create user. Check ${LOG_FILE} for details."
+        else
+            psql -h "${db_host}" -p "${db_port}" -U postgres -c "CREATE USER ${db_user} WITH PASSWORD '${db_password}';" >> "${LOG_FILE}" 2>&1 || \
+                die "Failed to create user. You may need to run: sudo -u postgres psql -c \"CREATE USER ${db_user} WITH PASSWORD '${db_password}';\""
+        fi
         log_success "User created"
     fi
 
     # Grant privileges
     log_info "Granting privileges..."
-    psql -h "${db_host}" -p "${db_port}" -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};" >> "${LOG_FILE}" 2>&1
-    psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
-    psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
+    if ${use_sudo}; then
+        sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        sudo -u postgres psql -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        sudo -u postgres psql -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        sudo -u postgres psql -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        sudo -u postgres psql -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${db_user};" >> "${LOG_FILE}" 2>&1
+    else
+        psql -h "${db_host}" -p "${db_port}" -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE ${db_name} TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${db_user};" >> "${LOG_FILE}" 2>&1
+        psql -h "${db_host}" -p "${db_port}" -U postgres -d "${db_name}" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${db_user};" >> "${LOG_FILE}" 2>&1
+    fi
     log_success "Privileges granted"
+
+    # Test connection with new user
+    log_info "Testing database connection..."
+    if ! PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" -c "SELECT 1" >> "${LOG_FILE}" 2>&1; then
+        die "Cannot connect to database with user ${db_user}. Check credentials in .env"
+    fi
+    log_success "Database connection successful"
 
     # Run migrations
     log_info "Running database migrations..."
@@ -528,6 +628,16 @@ setup_database() {
     log_success "Database migrations completed"
 
     # Verify tables
+    verify_database_tables "${db_host}" "${db_port}" "${db_user}" "${db_password}" "${db_name}"
+}
+
+verify_database_tables() {
+    local db_host="$1"
+    local db_port="$2"
+    local db_user="$3"
+    local db_password="$4"
+    local db_name="$5"
+
     log_info "Verifying database schema..."
     local tables=$(PGPASSWORD="${db_password}" psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" \
         -t -c "SELECT tablename FROM pg_tables WHERE schemaname='public';" 2>> "${LOG_FILE}")
