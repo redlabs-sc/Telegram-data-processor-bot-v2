@@ -1113,24 +1113,110 @@ start_local_bot_api() {
         die "TELEGRAM_API_HASH is required for Local Bot API Server. Get it from https://my.telegram.org/apps"
     fi
 
-    # Kill any existing telegram-bot-api processes
-    log_info "  Stopping existing telegram-bot-api processes..."
-    local pids=$(pgrep -f "telegram-bot-api" || true)
+    # Check if telegram-bot-api is already running on port 8081
+    if curl -s -f "http://localhost:8081" > /dev/null 2>&1; then
+        log_info "  telegram-bot-api is already running on port 8081"
 
+        # Check if it's a Docker container
+        if command -v docker &> /dev/null; then
+            local container_id=$(docker ps --filter "publish=8081" --format "{{.ID}}" 2>/dev/null | head -1)
+            if [[ -n "${container_id}" ]]; then
+                local container_name=$(docker inspect --format '{{.Name}}' "${container_id}" 2>/dev/null | sed 's/^\///')
+                log_success "  Using existing Docker container: ${container_name} (${container_id})"
+                return 0
+            fi
+        fi
+
+        log_success "  Using existing telegram-bot-api service"
+        return 0
+    fi
+
+    # Check if Docker is available
+    local use_docker=false
+    if command -v docker &> /dev/null; then
+        if docker info > /dev/null 2>&1; then
+            use_docker=true
+            log_info "  Docker is available"
+        else
+            log_warning "  Docker installed but not running (will use native binary)"
+        fi
+    else
+        log_info "  Docker not found (will use native binary)"
+    fi
+
+    # Check for existing Docker container (stopped)
+    if ${use_docker}; then
+        local existing_container=$(docker ps -a --filter "name=telegram-bot-api" --format "{{.ID}}" 2>/dev/null | head -1)
+
+        if [[ -n "${existing_container}" ]]; then
+            log_info "  Found existing telegram-bot-api container"
+
+            # Check if container is running
+            local container_status=$(docker inspect --format '{{.State.Running}}' "${existing_container}" 2>/dev/null)
+
+            if [[ "${container_status}" == "true" ]]; then
+                # Container is running but not on port 8081 - restart it
+                log_info "  Restarting container with correct configuration..."
+                docker stop telegram-bot-api > /dev/null 2>&1 || true
+                docker rm telegram-bot-api > /dev/null 2>&1 || true
+            else
+                # Container exists but stopped - remove and recreate
+                log_info "  Removing stopped container..."
+                docker rm telegram-bot-api > /dev/null 2>&1 || true
+            fi
+        fi
+
+        # Start telegram-bot-api via Docker
+        log_info "  Starting telegram-bot-api via Docker..."
+
+        docker run -d \
+            --name telegram-bot-api \
+            --restart unless-stopped \
+            -p 8081:8081 \
+            -e TELEGRAM_API_ID="${api_id}" \
+            -e TELEGRAM_API_HASH="${api_hash}" \
+            -e TELEGRAM_LOCAL=true \
+            -v "${PROJECT_ROOT}/telegram-bot-api-data:/var/lib/telegram-bot-api" \
+            aiogram/telegram-bot-api >> "${LOG_FILE}" 2>&1
+
+        if [[ $? -eq 0 ]]; then
+            log_success "  Docker container started"
+
+            # Wait for it to be ready
+            log_info "  Waiting for telegram-bot-api to be ready..."
+            local max_wait=60
+            local waited=0
+
+            while ! curl -s -f "http://localhost:8081" > /dev/null 2>&1; do
+                if [[ ${waited} -ge ${max_wait} ]]; then
+                    log_error "telegram-bot-api did not start within ${max_wait} seconds"
+                    log_error "Check Docker logs: docker logs telegram-bot-api"
+                    die "telegram-bot-api failed to start"
+                fi
+                sleep 1
+                ((waited++))
+            done
+
+            log_success "Telegram Local Bot API Server is ready (Docker, port 8081)"
+            return 0
+        else
+            log_warning "  Failed to start Docker container, falling back to native binary"
+        fi
+    fi
+
+    # Fall back to native binary
+    log_info "  Using native telegram-bot-api binary..."
+
+    # Kill any existing native telegram-bot-api processes
+    local pids=$(pgrep -f "telegram-bot-api" || true)
     if [[ -n "${pids}" ]]; then
-        log_info "    Found existing processes: ${pids}"
+        log_info "    Stopping existing processes: ${pids}"
         echo "${pids}" | xargs kill -TERM 2>/dev/null || true
         sleep 2
-
-        # Force kill if still running
         pids=$(pgrep -f "telegram-bot-api" || true)
         if [[ -n "${pids}" ]]; then
-            log_warning "    Force killing stubborn processes..."
             echo "${pids}" | xargs kill -KILL 2>/dev/null || true
         fi
-        log_success "  Existing telegram-bot-api stopped"
-    else
-        log_info "  No existing telegram-bot-api processes found"
     fi
 
     # Check if telegram-bot-api binary exists
@@ -1162,7 +1248,7 @@ start_local_bot_api() {
         fi
 
         if [[ -z "${bot_api_bin}" ]]; then
-            die "telegram-bot-api installation failed. Please install manually."
+            die "telegram-bot-api installation failed. Please install manually or use Docker."
         fi
     fi
 
@@ -1203,7 +1289,7 @@ start_local_bot_api() {
         ((waited++))
     done
 
-    log_success "Telegram Local Bot API Server is ready (port 8081)"
+    log_success "Telegram Local Bot API Server is ready (native, port 8081)"
 }
 
 start_coordinator() {
