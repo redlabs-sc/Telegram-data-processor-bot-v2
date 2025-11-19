@@ -1065,32 +1065,28 @@ install_telegram_bot_api() {
     log_info "  Building telegram-bot-api (this may take 10-20 minutes)..."
 
     mkdir -p "${build_dir}/build"
-    cd "${build_dir}/build"
 
-    # Configure with cmake
+    # Configure with cmake (use subshell to avoid changing directory)
     if [[ "${os}" == "macos" ]]; then
-        cmake -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl/ .. >> "${LOG_FILE}" 2>&1 || die "cmake configuration failed"
+        (cd "${build_dir}/build" && cmake -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl/ ..) >> "${LOG_FILE}" 2>&1 || die "cmake configuration failed"
     else
-        cmake -DCMAKE_BUILD_TYPE=Release .. >> "${LOG_FILE}" 2>&1 || die "cmake configuration failed"
+        (cd "${build_dir}/build" && cmake -DCMAKE_BUILD_TYPE=Release ..) >> "${LOG_FILE}" 2>&1 || die "cmake configuration failed"
     fi
 
     # Build (use multiple cores if available)
     local num_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
-    cmake --build . -j "${num_cores}" >> "${LOG_FILE}" 2>&1 || die "Build failed"
+    (cd "${build_dir}/build" && cmake --build . -j "${num_cores}") >> "${LOG_FILE}" 2>&1 || die "Build failed"
 
     log_success "  telegram-bot-api built successfully"
 
     # Try to install system-wide (optional, may fail without sudo)
     log_info "  Attempting system-wide installation..."
-    if sudo cmake --build . --target install >> "${LOG_FILE}" 2>&1; then
+    if (cd "${build_dir}/build" && sudo cmake --build . --target install) >> "${LOG_FILE}" 2>&1; then
         log_success "  telegram-bot-api installed to /usr/local/bin"
     else
         log_warning "  System-wide installation failed (will use local binary)"
         log_info "  Binary location: ${build_dir}/build/telegram-bot-api"
     fi
-
-    # Return to project root
-    cd "${PROJECT_ROOT}"
 
     log_success "Telegram Bot API Server installation complete"
 }
