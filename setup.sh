@@ -266,7 +266,7 @@ start_postgresql() {
             return 1
         fi
         sleep 1
-        ((waited++))
+        ((++waited))
     done
 
     return 0
@@ -1194,7 +1194,7 @@ start_local_bot_api() {
                     die "telegram-bot-api failed to start"
                 fi
                 sleep 1
-                ((waited++))
+                ((++waited))
             done
 
             log_success "Telegram Local Bot API Server is ready (Docker, port 8081)"
@@ -1286,7 +1286,7 @@ start_local_bot_api() {
             die "telegram-bot-api failed to start"
         fi
         sleep 1
-        ((waited++))
+        ((++waited))
     done
 
     log_success "Telegram Local Bot API Server is ready (native, port 8081)"
