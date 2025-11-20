@@ -389,7 +389,7 @@ func processArchivesInDir(inputDir, outputDir string) {
 
 	start := time.Now()
 
-	passwords := readPasswordsFromFile("./pass.txt")
+	passwords := readPasswordsFromFile("app/extraction/files/pass.txt")
 
 	for {
 		files, err := os.ReadDir(inputDir)

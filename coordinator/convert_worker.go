@@ -141,6 +141,26 @@ func runConvertStage(round *Round, logger *zap.Logger) ([]string, error) {
 		return nil, fmt.Errorf("convert.ConvertTextFiles() failed: %w", err)
 	}
 
+	// Rename the converted output file with unique filename
+	// Format: output_{roundID}_{timestamp}.txt
+	if _, err := os.Stat(outputFile); err == nil {
+		timestamp := time.Now().Format("20060102_150405")
+		uniqueOutputFile := filepath.Join("app/extraction/files/txt",
+			fmt.Sprintf("output_%s_%s.txt", round.RoundID, timestamp))
+
+		err = os.Rename(outputFile, uniqueOutputFile)
+		if err != nil {
+			logger.Warn("Failed to rename converted file, continuing with original name",
+				zap.Error(err),
+				zap.String("original", outputFile),
+				zap.String("new", uniqueOutputFile))
+		} else {
+			logger.Info("Renamed converted output file",
+				zap.String("original", outputFile),
+				zap.String("new", uniqueOutputFile))
+		}
+	}
+
 	// List all files in output directory (txt/) for store stage
 	// convert.go writes to a single output file, but also moves source files
 	txtDir := "app/extraction/files/txt"

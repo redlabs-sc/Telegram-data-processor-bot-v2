@@ -902,6 +902,7 @@ setup_directories() {
         "app/extraction/files/errors"
         "app/extraction/files/etbanks"
         "app/extraction/files/nopass"
+        "app/extraction/files/tmp"
     )
 
     for dir in "${dirs[@]}"; do
@@ -909,14 +910,14 @@ setup_directories() {
         log_success "  Created ${dir}"
     done
 
-    # Copy password file if it doesn't exist
-    if [[ ! -f "${PROJECT_ROOT}/app/extraction/pass.txt" ]]; then
+    # Copy password file if it doesn't exist (extract.go uses app/extraction/files/pass.txt)
+    if [[ ! -f "${PROJECT_ROOT}/app/extraction/files/pass.txt" ]]; then
         if [[ -f "${PROJECT_ROOT}/pass.txt.example" ]]; then
-            cp "${PROJECT_ROOT}/pass.txt.example" "${PROJECT_ROOT}/app/extraction/pass.txt"
-            log_warning "Created app/extraction/pass.txt from example. Edit if needed."
+            cp "${PROJECT_ROOT}/pass.txt.example" "${PROJECT_ROOT}/app/extraction/files/pass.txt"
+            log_warning "Created app/extraction/files/pass.txt from example. Edit if needed."
         else
-            touch "${PROJECT_ROOT}/app/extraction/pass.txt"
-            log_warning "Created empty app/extraction/pass.txt. Add passwords if needed."
+            touch "${PROJECT_ROOT}/app/extraction/files/pass.txt"
+            log_warning "Created empty app/extraction/files/pass.txt. Add passwords if needed."
         fi
     fi
 }
@@ -1169,6 +1170,9 @@ start_local_bot_api() {
         # Start telegram-bot-api via Docker
         log_info "  Starting telegram-bot-api via Docker..."
 
+        # Create tmp directory for telegram-bot-api
+        mkdir -p "${PROJECT_ROOT}/app/extraction/files/tmp"
+
         docker run -d \
             --name telegram-bot-api \
             --restart unless-stopped \
@@ -1177,6 +1181,7 @@ start_local_bot_api() {
             -e TELEGRAM_API_HASH="${api_hash}" \
             -e TELEGRAM_LOCAL=true \
             -v "${PROJECT_ROOT}/telegram-bot-api-data:/var/lib/telegram-bot-api" \
+            -v "${PROJECT_ROOT}/app/extraction/files/tmp:/tmp" \
             aiogram/telegram-bot-api >> "${LOG_FILE}" 2>&1
 
         if [[ $? -eq 0 ]]; then
@@ -1254,9 +1259,11 @@ start_local_bot_api() {
 
     log_info "  Found telegram-bot-api: ${bot_api_bin}"
 
-    # Create working directory for telegram-bot-api
+    # Create working directory and tmp directory for telegram-bot-api
     local bot_api_dir="${PROJECT_ROOT}/telegram-bot-api-data"
+    local bot_api_tmp="${PROJECT_ROOT}/app/extraction/files/tmp"
     mkdir -p "${bot_api_dir}"
+    mkdir -p "${bot_api_tmp}"
 
     # Start telegram-bot-api server
     log_info "  Starting telegram-bot-api server on port 8081..."
@@ -1266,6 +1273,7 @@ start_local_bot_api() {
         --api-hash="${api_hash}" \
         --local \
         --dir="${bot_api_dir}" \
+        --temp-dir="${bot_api_tmp}" \
         --http-port=8081 \
         > "${PROJECT_ROOT}/logs/telegram-bot-api.log" 2>&1 &
 

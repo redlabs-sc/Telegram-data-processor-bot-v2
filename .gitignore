@@ -64,6 +64,8 @@ vendor/
 # Temporary files
 tmp/
 temp/
+app/extraction/files/tmp/*
+!app/extraction/files/tmp/.gitkeep
 
 # Telegram Local Bot API Server
 telegram-bot-api/
